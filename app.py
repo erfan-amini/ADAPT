@@ -1,6 +1,7 @@
 """
-Flood Risk Assessment Tool
-Columbia University Climate School
+ADAPT - Assessment of Damage and Adaptation Planning Tool
+Center for Climate Systems Research
+The Climate School, Columbia University
 """
 
 import streamlit as st
@@ -15,7 +16,7 @@ import re
 # PAGE CONFIGURATION
 # ============================================================================
 st.set_page_config(
-    page_title="Flood Risk Assessment Tool",
+    page_title="ADAPT | Flood Risk Tool",
     page_icon="🌊",
     layout="wide",
     initial_sidebar_state="expanded"
@@ -26,16 +27,25 @@ st.set_page_config(
 # ============================================================================
 st.markdown("""
 <style>
-    .main-header {
-        font-size: 2.5rem;
+    .main-title {
+        font-size: 3.5rem;
         font-weight: bold;
         color: #0ea5e9;
-        margin-bottom: 0.5rem;
+        margin-bottom: 0rem;
+        text-align: center;
     }
-    .sub-header {
-        font-size: 1rem;
+    .main-subtitle {
+        font-size: 1.3rem;
+        color: #334155;
+        margin-bottom: 0.5rem;
+        text-align: center;
+        font-weight: 500;
+    }
+    .main-tagline {
+        font-size: 0.95rem;
         color: #64748b;
         margin-bottom: 2rem;
+        text-align: center;
     }
     .tab-description {
         font-size: 0.9rem;
@@ -81,6 +91,24 @@ st.markdown("""
     section[data-testid="stSidebar"] p {
         color: #334155 !important;
     }
+    /* Footer styling */
+    .footer {
+        text-align: center;
+        padding: 2rem 0;
+        margin-top: 2rem;
+        border-top: 1px solid #e2e8f0;
+    }
+    .footer-org {
+        font-size: 0.95rem;
+        color: #334155;
+        line-height: 1.8;
+        font-weight: 500;
+    }
+    .footer-license {
+        font-size: 0.8rem;
+        color: #94a3b8;
+        margin-top: 1rem;
+    }
 </style>
 """, unsafe_allow_html=True)
 
@@ -89,16 +117,9 @@ st.markdown("""
 # ============================================================================
 
 def parse_filename(filename):
-    """
-    Parse filename to extract location.
-    Expected formats:
-    - CSV1_Aggregated_WestPoint_ALL.csv
-    - CSV2_PerBuilding_MasticBeach_ALL.csv
-    """
-    # Remove extension
+    """Parse filename to extract location."""
     name = filename.replace('.csv', '').replace('.CSV', '')
     
-    # Extract location (look for known patterns or use regex)
     location = "Unknown Location"
     location_patterns = [
         ('MasticBeach', 'Mastic Beach'),
@@ -115,7 +136,6 @@ def parse_filename(filename):
             location = display_name
             break
     
-    # If no known pattern, try to extract from filename
     if location == "Unknown Location":
         parts = name.split('_')
         for part in parts:
@@ -132,7 +152,6 @@ def is_residential(occupancy_type):
     if pd.isna(occupancy_type):
         return False
     occ = str(occupancy_type).upper()
-    # Residential types typically start with RES
     return occ.startswith('RES')
 
 
@@ -187,10 +206,7 @@ def load_csv(file):
 
 
 def prepare_map_data(df_buildings, target_year, scenario):
-    """
-    Prepare building data for map display.
-    Pivot data so each building has one row with all action values.
-    """
+    """Prepare building data for map display."""
     df_filtered = df_buildings[
         (df_buildings['TargetYear'] == target_year) &
         (df_buildings['Scenario'] == scenario)
@@ -220,10 +236,7 @@ def prepare_map_data(df_buildings, target_year, scenario):
 
 
 def aggregate_filtered_data(df_buildings, target_year, scenario):
-    """
-    Aggregate building-level data to compute community totals.
-    This is used when filtering by occupancy type.
-    """
+    """Aggregate building-level data to compute community totals."""
     df_filtered = df_buildings[
         (df_buildings['TargetYear'] == target_year) &
         (df_buildings['Scenario'] == scenario)
@@ -232,7 +245,6 @@ def aggregate_filtered_data(df_buildings, target_year, scenario):
     if df_filtered.empty:
         return None
     
-    # Aggregate by Action
     agg_data = []
     for action in df_filtered['Action'].unique():
         df_action = df_filtered[df_filtered['Action'] == action]
@@ -247,7 +259,6 @@ def aggregate_filtered_data(df_buildings, target_year, scenario):
             'Num_Buildings': df_action['id'].nunique()
         }
         
-        # Add InFP/OutFP breakdown if Floodplain_Status exists
         if 'Floodplain_Status' in df_action.columns:
             df_under = df_action[df_action['Floodplain_Status'] == 'Under DFE']
             df_above = df_action[df_action['Floodplain_Status'] == 'Above DFE']
@@ -294,7 +305,7 @@ def main():
     # PROCESS UPLOADED FILES
     # ========================================================================
     
-    data_store = {}  # {location: {'agg': df, 'buildings': df}}
+    data_store = {}
     available_locations = set()
     
     if agg_files:
@@ -330,7 +341,6 @@ def main():
     with st.sidebar:
         st.header("🎛️ Data Selection")
         
-        # Location selector
         if len(available_locations) > 0:
             selected_location = st.selectbox(
                 "📍 Location",
@@ -340,7 +350,6 @@ def main():
         else:
             selected_location = None
         
-        # Occupancy Type selector - always show 3 options
         selected_occupancy = st.selectbox(
             "🏠 Occupancy Type",
             options=["All", "Residential", "Non-Residential"],
@@ -348,7 +357,6 @@ def main():
             format_func=lambda x: f"🏘️🏢 All Buildings" if x == "All" else f"🏘️ Residential" if x == "Residential" else f"🏢 Non-Residential"
         )
         
-        # Get raw data for selected location
         df_agg_raw = None
         df_buildings_raw = None
         
@@ -356,13 +364,11 @@ def main():
             df_agg_raw = data_store[selected_location].get('agg')
             df_buildings_raw = data_store[selected_location].get('buildings')
         
-        # Filter buildings by occupancy type
         df_buildings = filter_by_occupancy(df_buildings_raw, selected_occupancy)
         
         st.divider()
         st.header("🎛️ Scenario Filters")
         
-        # Year selector
         available_years = [2040, 2055, 2100]
         if df_buildings is not None and 'TargetYear' in df_buildings.columns:
             available_years = sorted(df_buildings['TargetYear'].unique())
@@ -375,7 +381,6 @@ def main():
             index=0
         )
         
-        # Scenario selector
         available_scenarios = ['P50', 'P90']
         if df_buildings is not None and 'Scenario' in df_buildings.columns:
             available_scenarios = sorted(df_buildings['Scenario'].unique())
@@ -391,7 +396,6 @@ def main():
         st.divider()
         st.header("🗺️ Map Settings")
         
-        # DFE filter
         if df_buildings is not None and 'Floodplain_Status' in df_buildings.columns:
             fp_options = df_buildings['Floodplain_Status'].dropna().unique().tolist()
             dfe_filter = st.multiselect(
@@ -404,27 +408,28 @@ def main():
         
         show_zero_damage = st.checkbox("Show buildings with $0 damage", value=True)
         
-        # Show counts
         if df_buildings is not None:
             st.divider()
             st.caption(f"**Buildings loaded:** {df_buildings['id'].nunique():,}")
     
     # ========================================================================
-    # HEADER
+    # HEADER - ADAPT Branding
     # ========================================================================
+    
+    st.markdown('<p class="main-title">🌊 ADAPT</p>', unsafe_allow_html=True)
+    st.markdown('<p class="main-subtitle">Assessment of Damage and Adaptation Planning Tool</p>', unsafe_allow_html=True)
     
     location_name = selected_location if selected_location else ""
     occupancy_label = selected_occupancy if selected_occupancy != "All" else "All Buildings"
     
     if selected_location:
-        title = f"🌊 {selected_location} Flood Risk Assessment"
+        tagline = f"Building-level flood damage assessment for <b>{selected_location}</b>"
         if selected_occupancy != "All":
-            title += f" — {selected_occupancy}"
+            tagline += f" — {selected_occupancy}"
     else:
-        title = "🌊 Flood Risk Assessment Tool"
+        tagline = "Building-level flood damage assessment under climate change scenarios"
     
-    st.markdown(f'<p class="main-header">{title}</p>', unsafe_allow_html=True)
-    st.markdown('<p class="sub-header">Building-level cumulative expected annual damage (EAD) under climate change scenarios</p>', unsafe_allow_html=True)
+    st.markdown(f'<p class="main-tagline">{tagline}</p>', unsafe_allow_html=True)
     
     # ========================================================================
     # CHECK IF DATA IS LOADED
@@ -454,10 +459,9 @@ def main():
         st.stop()
     
     # ========================================================================
-    # COMPUTE AGGREGATED DATA (filtered by occupancy)
+    # COMPUTE AGGREGATED DATA
     # ========================================================================
     
-    # Always compute aggregated data from filtered buildings for accuracy
     df_agg = None
     if df_buildings is not None:
         agg_frames = []
@@ -513,7 +517,6 @@ def main():
                     
                     action_cols_p50 = [col for col in df_map.columns if col.endswith('_P50')]
                     
-                    # Build hover text
                     hover_texts = []
                     for idx, row in df_map.iterrows():
                         text = f"<b>Building #{row['id']}</b><br>"
@@ -622,7 +625,6 @@ def main():
                     
                     st.plotly_chart(fig_map, use_container_width=True)
                     
-                    # Summary stats
                     col1, col2, col3, col4 = st.columns(4)
                     
                     with col1:
@@ -650,7 +652,6 @@ def main():
                         else:
                             st.metric("Max Potential Savings", "$0")
                     
-                    # Top 10 table
                     st.subheader(f"🔴 Top 10 Highest Risk Buildings (Baseline)")
                     
                     display_cols = ['id']
@@ -1014,9 +1015,15 @@ def main():
     # ========================================================================
     st.divider()
     st.markdown("""
-    <div style='text-align: center; color: #64748b; font-size: 0.8rem;'>
-        Building-Level Flood Risk Assessment Tool | Columbia University Climate School<br>
-        Data source: National Structure Inventory (NSI) with local calibration | DFE = Design Flood Elevation (BFE+2)
+    <div class="footer">
+        <div class="footer-org">
+            Center for Climate Systems Research<br>
+            The Climate School<br>
+            Columbia University
+        </div>
+        <div class="footer-license">
+            © 2025 Erfan Amini · DFE = Design Flood Elevation (BFE+2)
+        </div>
     </div>
     """, unsafe_allow_html=True)
 
