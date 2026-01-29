@@ -9,8 +9,8 @@ import pandas as pd
 import numpy as np
 import plotly.express as px
 import plotly.graph_objects as go
-from plotly.subplots import make_subplots
-import re
+import os
+import glob
 
 # ============================================================================
 # PAGE CONFIGURATION
@@ -28,14 +28,14 @@ st.set_page_config(
 st.markdown("""
 <style>
     .main-title {
-        font-size: 3.5rem;
+        font-size: 3rem;
         font-weight: bold;
         color: #0ea5e9;
         margin-bottom: 0rem;
         text-align: center;
     }
     .main-subtitle {
-        font-size: 1.3rem;
+        font-size: 1.2rem;
         color: #334155;
         margin-bottom: 0.5rem;
         text-align: center;
@@ -63,7 +63,6 @@ st.markdown("""
         border-radius: 0.5rem;
         border: 1px solid #e2e8f0;
     }
-    /* Fix dropdown menu readability */
     .stSelectbox > div > div {
         background-color: #ffffff !important;
         color: #1e293b !important;
@@ -75,7 +74,6 @@ st.markdown("""
         background-color: #ffffff !important;
         color: #1e293b !important;
     }
-    /* Sidebar styling */
     section[data-testid="stSidebar"] {
         background-color: #f1f5f9;
     }
@@ -91,23 +89,21 @@ st.markdown("""
     section[data-testid="stSidebar"] p {
         color: #334155 !important;
     }
-    /* Footer styling */
     .footer {
         text-align: center;
-        padding: 2rem 0;
-        margin-top: 2rem;
-        border-top: 1px solid #e2e8f0;
+        padding: 1.5rem 0;
+        color: #64748b;
+        font-size: 0.85rem;
+        line-height: 1.6;
     }
     .footer-org {
-        font-size: 0.95rem;
-        color: #334155;
-        line-height: 1.8;
         font-weight: 500;
+        color: #334155;
     }
     .footer-license {
-        font-size: 0.8rem;
+        font-size: 0.75rem;
         color: #94a3b8;
-        margin-top: 1rem;
+        margin-top: 0.5rem;
     }
 </style>
 """, unsafe_allow_html=True)
@@ -118,7 +114,7 @@ st.markdown("""
 
 def parse_filename(filename):
     """Parse filename to extract location."""
-    name = filename.replace('.csv', '').replace('.CSV', '')
+    name = os.path.basename(filename).replace('.csv', '').replace('.CSV', '')
     
     location = "Unknown Location"
     location_patterns = [
@@ -200,9 +196,48 @@ def format_currency(value):
 
 
 @st.cache_data
-def load_csv(file):
-    """Load CSV file"""
+def load_csv_file(filepath):
+    """Load CSV file from path"""
+    return pd.read_csv(filepath)
+
+
+@st.cache_data
+def load_csv_upload(file):
+    """Load CSV file from upload"""
     return pd.read_csv(file)
+
+
+def load_data_from_folder(data_folder="data"):
+    """Load all CSV files from the data folder"""
+    data_store = {}
+    
+    if not os.path.exists(data_folder):
+        return data_store, []
+    
+    available_locations = set()
+    
+    # Find all CSV files
+    csv_files = glob.glob(os.path.join(data_folder, "*.csv")) + glob.glob(os.path.join(data_folder, "*.CSV"))
+    
+    for filepath in csv_files:
+        filename = os.path.basename(filepath)
+        location = parse_filename(filename)
+        available_locations.add(location)
+        
+        if location not in data_store:
+            data_store[location] = {'agg': None, 'buildings': None}
+        
+        df = load_csv_file(filepath)
+        
+        # Determine if it's aggregated or per-building data
+        if 'CSV1' in filename.upper() or 'AGGREGATED' in filename.upper():
+            data_store[location]['agg'] = df
+        elif 'CSV2' in filename.upper() or 'PERBUILDING' in filename.upper() or 'PER_BUILDING' in filename.upper():
+            if 'Floodplain_Status' in df.columns:
+                df['Floodplain_Status'] = df['Floodplain_Status'].apply(convert_floodplain_status)
+            data_store[location]['buildings'] = df
+    
+    return data_store, sorted(list(available_locations))
 
 
 def prepare_map_data(df_buildings, target_year, scenario):
@@ -276,69 +311,70 @@ def aggregate_filtered_data(df_buildings, target_year, scenario):
 
 def main():
     # ========================================================================
-    # SIDEBAR - Data Loading
+    # LOAD DATA FROM FOLDER (if exists)
+    # ========================================================================
+    data_store, available_locations = load_data_from_folder("data")
+    data_loaded_from_folder = len(available_locations) > 0
+    
+    # ========================================================================
+    # SIDEBAR
     # ========================================================================
     with st.sidebar:
-        st.header("📁 Data Files")
+        # Only show upload section if no data in folder
+        if not data_loaded_from_folder:
+            st.header("📁 Data Files")
+            
+            st.subheader("Aggregated Data (CSV1)")
+            agg_files = st.file_uploader(
+                "Upload aggregated CSV files",
+                type=['csv'],
+                accept_multiple_files=True,
+                key="agg_uploader",
+                help="e.g., CSV1_Aggregated_WestPoint_ALL.csv"
+            )
+            
+            st.subheader("Per-Building Data (CSV2)")
+            building_files = st.file_uploader(
+                "Upload per-building CSV files",
+                type=['csv'],
+                accept_multiple_files=True,
+                key="building_uploader",
+                help="e.g., CSV2_PerBuilding_WestPoint_ALL.csv"
+            )
+            
+            # Process uploaded files
+            if agg_files:
+                for file in agg_files:
+                    location = parse_filename(file.name)
+                    if location not in available_locations:
+                        available_locations.append(location)
+                    
+                    if location not in data_store:
+                        data_store[location] = {'agg': None, 'buildings': None}
+                    
+                    df = load_csv_upload(file)
+                    data_store[location]['agg'] = df
+            
+            if building_files:
+                for file in building_files:
+                    location = parse_filename(file.name)
+                    if location not in available_locations:
+                        available_locations.append(location)
+                    
+                    if location not in data_store:
+                        data_store[location] = {'agg': None, 'buildings': None}
+                    
+                    df = load_csv_upload(file)
+                    if 'Floodplain_Status' in df.columns:
+                        df['Floodplain_Status'] = df['Floodplain_Status'].apply(convert_floodplain_status)
+                    data_store[location]['buildings'] = df
+            
+            available_locations = sorted(list(set(available_locations)))
+            
+            st.divider()
+        else:
+            st.success(f"✅ Data loaded: {len(available_locations)} location(s)")
         
-        st.subheader("Aggregated Data (CSV1)")
-        agg_files = st.file_uploader(
-            "Upload aggregated CSV files",
-            type=['csv'],
-            accept_multiple_files=True,
-            key="agg_uploader",
-            help="e.g., CSV1_Aggregated_WestPoint_ALL.csv"
-        )
-        
-        st.subheader("Per-Building Data (CSV2)")
-        building_files = st.file_uploader(
-            "Upload per-building CSV files",
-            type=['csv'],
-            accept_multiple_files=True,
-            key="building_uploader",
-            help="e.g., CSV2_PerBuilding_WestPoint_ALL.csv"
-        )
-        
-        st.divider()
-    
-    # ========================================================================
-    # PROCESS UPLOADED FILES
-    # ========================================================================
-    
-    data_store = {}
-    available_locations = set()
-    
-    if agg_files:
-        for file in agg_files:
-            location = parse_filename(file.name)
-            available_locations.add(location)
-            
-            if location not in data_store:
-                data_store[location] = {'agg': None, 'buildings': None}
-            
-            df = load_csv(file)
-            data_store[location]['agg'] = df
-    
-    if building_files:
-        for file in building_files:
-            location = parse_filename(file.name)
-            available_locations.add(location)
-            
-            if location not in data_store:
-                data_store[location] = {'agg': None, 'buildings': None}
-            
-            df = load_csv(file)
-            if 'Floodplain_Status' in df.columns:
-                df['Floodplain_Status'] = df['Floodplain_Status'].apply(convert_floodplain_status)
-            data_store[location]['buildings'] = df
-    
-    available_locations = sorted(list(available_locations))
-    
-    # ========================================================================
-    # SIDEBAR - Filters
-    # ========================================================================
-    
-    with st.sidebar:
         st.header("🎛️ Data Selection")
         
         if len(available_locations) > 0:
@@ -413,7 +449,7 @@ def main():
             st.caption(f"**Buildings loaded:** {df_buildings['id'].nunique():,}")
     
     # ========================================================================
-    # HEADER - ADAPT Branding
+    # HEADER
     # ========================================================================
     
     st.markdown('<p class="main-title">🌊 ADAPT</p>', unsafe_allow_html=True)
@@ -435,7 +471,7 @@ def main():
     # CHECK IF DATA IS LOADED
     # ========================================================================
     
-    if not agg_files and not building_files:
+    if len(available_locations) == 0:
         st.info("👆 Please upload your data files using the sidebar to get started.")
         
         st.subheader("📋 Expected Data Format")
@@ -625,33 +661,16 @@ def main():
                     
                     st.plotly_chart(fig_map, use_container_width=True)
                     
-                    col1, col2, col3, col4 = st.columns(4)
+                    # Summary stats - removed Best Strategy
+                    col1, col2 = st.columns(2)
                     
                     with col1:
                         st.metric("Buildings Shown", f"{len(df_map):,}")
                     with col2:
                         total_baseline = df_map[baseline_col].sum() if baseline_col else 0
                         st.metric("Total Baseline EAD", format_currency(total_baseline))
-                    with col3:
-                        if len(action_cols_p50) > 1:
-                            totals = {col.replace('_P50', ''): df_map[col].sum() for col in action_cols_p50}
-                            best_action = min(totals, key=totals.get)
-                            if best_action != 'Baseline':
-                                st.metric("Best Strategy", best_action.replace('_', ' '))
-                            else:
-                                st.metric("Best Strategy", "N/A")
-                        else:
-                            st.metric("Best Strategy", "N/A")
-                    with col4:
-                        if len(action_cols_p50) > 1:
-                            totals = {col.replace('_P50', ''): df_map[col].sum() for col in action_cols_p50}
-                            best_total = min(totals.values())
-                            baseline_total = totals.get('Baseline', best_total)
-                            savings = baseline_total - best_total
-                            st.metric("Max Potential Savings", format_currency(savings))
-                        else:
-                            st.metric("Max Potential Savings", "$0")
                     
+                    # Top 10 table
                     st.subheader(f"🔴 Top 10 Highest Risk Buildings (Baseline)")
                     
                     display_cols = ['id']
@@ -857,6 +876,10 @@ def main():
                 df_building = df_buildings[df_buildings['id'] == selected_id]
                 building_info = df_building.iloc[0]
                 
+                # Get building's DFE status
+                building_dfe_status = building_info.get('Floodplain_Status', 'Unknown')
+                is_above_dfe = building_dfe_status == 'Above DFE'
+                
                 st.subheader(f"Building #{selected_id}")
                 
                 col1, col2, col3, col4 = st.columns(4)
@@ -932,10 +955,19 @@ def main():
                     (df_building['TargetYear'] == target_year) & (df_building['Scenario'] == scenario)
                 ]
                 
+                # Filter out Elevate for Above DFE buildings
+                if is_above_dfe:
+                    df_building_current = df_building_current[df_building_current['Action'] != 'Elevate']
+                
                 if not df_building_current.empty:
+                    # Adjust color map based on whether Elevate is included
+                    color_map = {'Baseline': '#ef4444', 'Raise Utilities': '#f97316',
+                        'WFP B': '#eab308', 'WFP 1st': '#3b82f6'}
+                    if not is_above_dfe:
+                        color_map['Elevate'] = '#22c55e'
+                    
                     fig_actions = px.bar(df_building_current, x='Action', y='CumEAD_P50', color='Action',
-                        color_discrete_map={'Baseline': '#ef4444', 'Raise Utilities': '#f97316',
-                            'WFP B': '#eab308', 'Elevate': '#22c55e', 'WFP 1st': '#3b82f6'},
+                        color_discrete_map=color_map,
                         title=f"EAD by Adaptation Strategy ({target_year}, {scenario})")
                     fig_actions.update_layout(showlegend=False, height=350, yaxis_tickformat="$,.0f")
                     st.plotly_chart(fig_actions, use_container_width=True)
@@ -1022,7 +1054,8 @@ def main():
             Columbia University
         </div>
         <div class="footer-license">
-            © 2025 Erfan Amini · DFE = Design Flood Elevation (BFE+2)
+            © 2025 Erfan Amini. All rights reserved.<br>
+            DFE = Design Flood Elevation (BFE+2)
         </div>
     </div>
     """, unsafe_allow_html=True)
