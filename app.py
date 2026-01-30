@@ -349,14 +349,17 @@ def main():
         
         # First run or password not correct
         if "password_correct" not in st.session_state:
-            st.markdown('<p style="font-size: 2rem; font-weight: bold; color: #0ea5e9; text-align: center;">🔒 ADAPT</p>', unsafe_allow_html=True)
-            st.markdown('<p style="text-align: center; color: #64748b;">Assessment of Damage and Adaptation Planning Tool</p>', unsafe_allow_html=True)
-            st.text_input(
-                "Enter password to access the tool:",
-                type="password",
-                on_change=password_entered,
-                key="password"
-            )
+            st.markdown('<div style="height: 2rem;"></div>', unsafe_allow_html=True)
+            st.markdown('<p style="font-size: 2.5rem; font-weight: bold; color: #0ea5e9; text-align: center;">🔒 ADAPT</p>', unsafe_allow_html=True)
+            st.markdown('<p style="text-align: center; color: #64748b; margin-bottom: 2rem;">Assessment of Damage and Adaptation Planning Tool</p>', unsafe_allow_html=True)
+            col1, col2, col3 = st.columns([1, 1.5, 1])
+            with col2:
+                st.text_input(
+                    "Enter password to access the tool:",
+                    type="password",
+                    on_change=password_entered,
+                    key="password"
+                )
             return False
         
         # Password correct
@@ -365,15 +368,18 @@ def main():
         
         # Password incorrect
         else:
-            st.markdown('<p style="font-size: 2rem; font-weight: bold; color: #0ea5e9; text-align: center;">🔒 ADAPT</p>', unsafe_allow_html=True)
-            st.markdown('<p style="text-align: center; color: #64748b;">Assessment of Damage and Adaptation Planning Tool</p>', unsafe_allow_html=True)
-            st.text_input(
-                "Enter password to access the tool:",
-                type="password",
-                on_change=password_entered,
-                key="password"
-            )
-            st.error("😕 Incorrect password. Please try again.")
+            st.markdown('<div style="height: 2rem;"></div>', unsafe_allow_html=True)
+            st.markdown('<p style="font-size: 2.5rem; font-weight: bold; color: #0ea5e9; text-align: center;">🔒 ADAPT</p>', unsafe_allow_html=True)
+            st.markdown('<p style="text-align: center; color: #64748b; margin-bottom: 2rem;">Assessment of Damage and Adaptation Planning Tool</p>', unsafe_allow_html=True)
+            col1, col2, col3 = st.columns([1, 1.5, 1])
+            with col2:
+                st.text_input(
+                    "Enter password to access the tool:",
+                    type="password",
+                    on_change=password_entered,
+                    key="password"
+                )
+                st.error("😕 Incorrect password. Please try again.")
             return False
     
     if not check_password():
