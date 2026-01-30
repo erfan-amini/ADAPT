@@ -333,6 +333,53 @@ def aggregate_filtered_data(df_buildings, target_year, scenario):
 
 def main():
     # ========================================================================
+    # PASSWORD PROTECTION
+    # ========================================================================
+    
+    def check_password():
+        """Returns True if the user entered the correct password."""
+        
+        def password_entered():
+            """Checks whether a password entered by the user is correct."""
+            if st.session_state["password"] == "NY2026VA":
+                st.session_state["password_correct"] = True
+                del st.session_state["password"]  # Don't store password
+            else:
+                st.session_state["password_correct"] = False
+        
+        # First run or password not correct
+        if "password_correct" not in st.session_state:
+            st.markdown('<p style="font-size: 2rem; font-weight: bold; color: #0ea5e9; text-align: center;">🔒 ADAPT</p>', unsafe_allow_html=True)
+            st.markdown('<p style="text-align: center; color: #64748b;">Assessment of Damage and Adaptation Planning Tool</p>', unsafe_allow_html=True)
+            st.text_input(
+                "Enter password to access the tool:",
+                type="password",
+                on_change=password_entered,
+                key="password"
+            )
+            return False
+        
+        # Password correct
+        elif st.session_state["password_correct"]:
+            return True
+        
+        # Password incorrect
+        else:
+            st.markdown('<p style="font-size: 2rem; font-weight: bold; color: #0ea5e9; text-align: center;">🔒 ADAPT</p>', unsafe_allow_html=True)
+            st.markdown('<p style="text-align: center; color: #64748b;">Assessment of Damage and Adaptation Planning Tool</p>', unsafe_allow_html=True)
+            st.text_input(
+                "Enter password to access the tool:",
+                type="password",
+                on_change=password_entered,
+                key="password"
+            )
+            st.error("😕 Incorrect password. Please try again.")
+            return False
+    
+    if not check_password():
+        st.stop()
+    
+    # ========================================================================
     # LOAD DATA FROM FOLDER (if exists)
     # ========================================================================
     data_store, available_locations = load_data_from_folder("data")
