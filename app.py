@@ -23,32 +23,59 @@ st.set_page_config(
 )
 
 # ============================================================================
-# CUSTOM CSS FOR STYLING
+# CUSTOM CSS FOR STYLING - LARGER FONTS
 # ============================================================================
 st.markdown("""
 <style>
+    /* Main title - ADAPT (increased from 3.5rem to 4rem) */
     .main-title {
-        font-size: 3rem;
+        font-size: 4rem;
         font-weight: bold;
         color: #0ea5e9;
         margin-bottom: 0rem;
         text-align: center;
     }
+    /* Subtitle - spelled out name (increased from 1.5rem to 1.75rem) */
     .main-subtitle {
-        font-size: 1.2rem;
+        font-size: 1.75rem;
         color: #334155;
         margin-bottom: 0.5rem;
         text-align: center;
         font-weight: 500;
     }
+    /* Tagline (increased from 1.1rem to 1.25rem) */
     .main-tagline {
-        font-size: 0.95rem;
+        font-size: 1.25rem;
         color: #64748b;
         margin-bottom: 2rem;
         text-align: center;
     }
+    
+    /* Tab titles - bigger font (increased from 1.2rem to 1.4rem) */
+    .stTabs [data-baseweb="tab-list"] button [data-testid="stMarkdownContainer"] p {
+        font-size: 1.4rem !important;
+        font-weight: 500;
+    }
+    .stTabs [data-baseweb="tab-list"] button {
+        padding: 0.85rem 1.75rem;
+    }
+    
+    /* Section headers/subheaders inside tabs (increased from 1.5rem to 1.75rem) */
+    h2 {
+        font-size: 1.75rem !important;
+    }
+    h3 {
+        font-size: 1.5rem !important;
+    }
+    
+    /* Streamlit subheader override */
+    [data-testid="stSubheader"] {
+        font-size: 1.75rem !important;
+    }
+    
+    /* Tab description (increased from 1rem to 1.1rem) */
     .tab-description {
-        font-size: 0.9rem;
+        font-size: 1.1rem;
         color: #64748b;
         font-style: italic;
         margin-bottom: 1rem;
@@ -57,6 +84,7 @@ st.markdown("""
         border-radius: 0.25rem;
         border-left: 3px solid #0ea5e9;
     }
+    
     .metric-card {
         background-color: #f8fafc;
         padding: 1rem;
@@ -93,7 +121,7 @@ st.markdown("""
         text-align: center;
         padding: 1.5rem 0;
         color: #64748b;
-        font-size: 0.85rem;
+        font-size: 1rem;
         line-height: 1.6;
     }
     .footer-org {
@@ -101,7 +129,7 @@ st.markdown("""
         color: #334155;
     }
     .footer-license {
-        font-size: 0.75rem;
+        font-size: 0.9rem;
         color: #94a3b8;
         margin-top: 0.5rem;
     }
@@ -216,7 +244,6 @@ def load_data_from_folder(data_folder="data"):
     
     available_locations = set()
     
-    # Find all CSV files
     csv_files = glob.glob(os.path.join(data_folder, "*.csv")) + glob.glob(os.path.join(data_folder, "*.CSV"))
     
     for filepath in csv_files:
@@ -229,7 +256,6 @@ def load_data_from_folder(data_folder="data"):
         
         df = load_csv_file(filepath)
         
-        # Determine if it's aggregated or per-building data
         if 'CSV1' in filename.upper() or 'AGGREGATED' in filename.upper():
             data_store[location]['agg'] = df
         elif 'CSV2' in filename.upper() or 'PERBUILDING' in filename.upper() or 'PER_BUILDING' in filename.upper():
@@ -320,7 +346,6 @@ def main():
     # SIDEBAR
     # ========================================================================
     with st.sidebar:
-        # Only show upload section if no data in folder
         if not data_loaded_from_folder:
             st.header("📁 Data Files")
             
@@ -342,7 +367,6 @@ def main():
                 help="e.g., CSV2_PerBuilding_WestPoint_ALL.csv"
             )
             
-            # Process uploaded files
             if agg_files:
                 for file in agg_files:
                     location = parse_filename(file.name)
@@ -661,7 +685,6 @@ def main():
                     
                     st.plotly_chart(fig_map, use_container_width=True)
                     
-                    # Summary stats - removed Best Strategy
                     col1, col2 = st.columns(2)
                     
                     with col1:
@@ -670,7 +693,6 @@ def main():
                         total_baseline = df_map[baseline_col].sum() if baseline_col else 0
                         st.metric("Total Baseline EAD", format_currency(total_baseline))
                     
-                    # Top 10 table
                     st.subheader(f"🔴 Top 10 Highest Risk Buildings (Baseline)")
                     
                     display_cols = ['id']
@@ -876,7 +898,6 @@ def main():
                 df_building = df_buildings[df_buildings['id'] == selected_id]
                 building_info = df_building.iloc[0]
                 
-                # Get building's DFE status
                 building_dfe_status = building_info.get('Floodplain_Status', 'Unknown')
                 is_above_dfe = building_dfe_status == 'Above DFE'
                 
@@ -955,12 +976,10 @@ def main():
                     (df_building['TargetYear'] == target_year) & (df_building['Scenario'] == scenario)
                 ]
                 
-                # Filter out Elevate for Above DFE buildings
                 if is_above_dfe:
                     df_building_current = df_building_current[df_building_current['Action'] != 'Elevate']
                 
                 if not df_building_current.empty:
-                    # Adjust color map based on whether Elevate is included
                     color_map = {'Baseline': '#ef4444', 'Raise Utilities': '#f97316',
                         'WFP B': '#eab308', 'WFP 1st': '#3b82f6'}
                     if not is_above_dfe:
