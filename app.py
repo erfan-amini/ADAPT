@@ -27,12 +27,24 @@ st.set_page_config(
 # ============================================================================
 st.markdown("""
 <style>
-    /* Tagline */
+    /* Reduce top padding on main content */
+    .block-container {
+        padding-top: 1rem;
+    }
+    
+    /* Tagline - reduced margin */
     .main-tagline {
-        font-size: 1.25rem;
+        font-size: 1.1rem;
         color: #64748b;
-        margin-bottom: 2rem;
+        margin-bottom: 0.75rem;
+        margin-top: 0;
         text-align: center;
+    }
+    
+    /* Reduce whitespace around images */
+    [data-testid="stImage"] {
+        margin-top: -0.5rem;
+        margin-bottom: -0.5rem;
     }
     
     /* Tab titles - smaller */
@@ -457,18 +469,18 @@ def main():
             st.caption(f"**Buildings loaded:** {df_buildings['id'].nunique():,}")
     
     # ========================================================================
-    # HEADER WITH LOGO
+    # HEADER WITH LOGO (compact)
     # ========================================================================
     
-    # Display logo from logo.png file
+    # Display logo from logo.png file - smaller and centered
     if os.path.exists("logo.png"):
-        col1, col2, col3 = st.columns([1, 2, 1])
+        col1, col2, col3 = st.columns([1.5, 1, 1.5])
         with col2:
             st.image("logo.png", use_container_width=True)
     else:
         # Fallback text if logo not found
-        st.markdown('<p style="font-size: 3.5rem; font-weight: bold; color: #0ea5e9; text-align: center; margin-bottom: 0;">ADAPT</p>', unsafe_allow_html=True)
-        st.markdown('<p style="font-size: 1.5rem; color: #334155; text-align: center; font-weight: 500;">Assessment of Damage and Adaptation Planning Tool</p>', unsafe_allow_html=True)
+        st.markdown('<p style="font-size: 2.5rem; font-weight: bold; color: #0ea5e9; text-align: center; margin: 0; padding: 0;">ADAPT</p>', unsafe_allow_html=True)
+        st.markdown('<p style="font-size: 1.1rem; color: #334155; text-align: center; font-weight: 500; margin: 0; padding: 0;">Assessment of Damage and Adaptation Planning Tool</p>', unsafe_allow_html=True)
     
     location_name = selected_location if selected_location else ""
     occupancy_label = selected_occupancy if selected_occupancy != "All" else "All Buildings"
@@ -480,7 +492,7 @@ def main():
     else:
         tagline = "Building-level flood damage assessment under climate change scenarios"
     
-    st.markdown(f'<p class="main-tagline">{tagline}</p>', unsafe_allow_html=True)
+    st.markdown(f'<p class="main-tagline" style="margin-top: 0.25rem;">{tagline}</p>', unsafe_allow_html=True)
     
     # ========================================================================
     # CHECK IF DATA IS LOADED
