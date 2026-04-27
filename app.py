@@ -652,31 +652,18 @@ def compute_damage_bin_breaks(df_buildings, scenario,
                               thr=1000.0):
     """Compute stable damage-bin breakpoints across ALL years for the given
     SLR scenario. The breaks come from the pooled distribution of nonzero
-    No-Mitigation P95 damages across every year, so the same building gets
+    No-Mitigation P90 damages across every year, so the same building gets
     the same color regardless of which year is selected.
     
     This guarantees that switching the year on the Damage Bins map
     redistributes buildings *across* the same bins, rather than redefining
     the bins themselves — which makes year-to-year comparisons meaningful.
     
-    Parameters
-    ----------
-    df_buildings : DataFrame
-        Per-building, per-action, per-(year, SLR) records (already filtered
-        by location and occupancy via the sidebar).
-    scenario : str
-        SLR scenario key, e.g. "50th-percentile" or "90th-percentile".
-    p_breaks : tuple[float]
-        Quantile points of the pooled nonzero-damage distribution at which
-        to place breakpoints. Default 20/40/60/80.
-    thr : float
-        Damages below this value are treated as zero and excluded.
-    
-    Returns
-    -------
-    list[float] | None
-        Up to len(p_breaks) sorted breakpoints, snapped to nice rounded
-        values; returns None if no nonzero damages exist for this scenario.
+    The upper-tail percentile used here is **P90**, matching the workshop
+    convention and the Distributions tab's "Building Counts by Adaptation
+    Effectiveness" classifier — so the same building gets the same
+    Damage-Bins color, the same Adaptation-Effectiveness category, and the
+    same Distributions-tab bucket.
     """
     df_nm = df_buildings[
         (df_buildings['Action'] == 'No mitigation') &
@@ -685,7 +672,7 @@ def compute_damage_bin_breaks(df_buildings, scenario,
     if df_nm.empty:
         return None
     
-    pooled = df_nm['CumEAD_P95'].values.astype(float)
+    pooled = df_nm['CumEAD_P90'].values.astype(float)
     pooled = pooled[~np.isnan(pooled)]
     nonzero = pooled[pooled > thr]
     if len(nonzero) == 0:
@@ -709,7 +696,16 @@ def compute_damage_bin_breaks(df_buildings, scenario,
 
 
 def prepare_map_data(df_buildings, target_year, scenario):
-    """Prepare building data for map display."""
+    """Prepare building data for map display.
+    
+    Pulls per-action P05/P50/P90/P95 columns from the long-format
+    per-building damage frame and pivots them into one wide row per
+    building with `{action}_P05`, `{action}_P50`, `{action}_P90`,
+    `{action}_P95` columns. P90 is the upper-tail proxy used by the
+    Damage Bins and Adaptation Effectiveness map views (the Distributions
+    tab uses the same convention); P95 is kept for any view that still
+    wants the deeper-tail bound.
+    """
     df_filtered = df_buildings[
         (df_buildings['TargetYear'] == target_year) &
         (df_buildings['SLR'] == scenario)
@@ -718,8 +714,11 @@ def prepare_map_data(df_buildings, target_year, scenario):
     if df_filtered.empty:
         return None
     
+    pct_cols = ['CumEAD_P05', 'CumEAD_P50', 'CumEAD_P90', 'CumEAD_P95']
+    pct_cols = [c for c in pct_cols if c in df_filtered.columns]
+    
     attr_cols = [col for col in df_filtered.columns if col not in 
-                 ['Action', 'CumEAD_P05', 'CumEAD_P50', 'CumEAD_P95', 'TargetYear', 'SLR']]
+                 ['Action', *pct_cols, 'TargetYear', 'SLR']]
     
     df_base = df_filtered[df_filtered['Action'] == 'No mitigation'][attr_cols].copy()
     
@@ -728,8 +727,10 @@ def prepare_map_data(df_buildings, target_year, scenario):
         df_base = df_filtered[df_filtered['Action'] == first_action][attr_cols].copy()
     
     for action in df_filtered['Action'].unique():
-        df_action = df_filtered[df_filtered['Action'] == action][['id', 'CumEAD_P05', 'CumEAD_P50', 'CumEAD_P95']].copy()
-        df_action.columns = ['id', f'{action}_P05', f'{action}_P50', f'{action}_P95']
+        df_action = df_filtered[df_filtered['Action'] == action][['id'] + pct_cols].copy()
+        df_action.columns = ['id'] + [
+            f'{action}_{c.split("_")[1]}' for c in pct_cols
+        ]
         df_base = df_base.merge(df_action, on='id', how='left')
     
     if 'Floodplain_Status' in df_base.columns:
@@ -1760,7 +1761,10 @@ def main():
                 # =============================================================
                 # PLOTS 3, 4, 5 — Per-building damage classification
                 # Ported from VVV_Visualization_for_workshop_MasticBeach.py
-                # Uses per-building P95 as upper-tail proxy (workshop uses P90).
+                # Uses per-building P90 as upper-tail proxy (matches the
+                # workshop convention; P95 was tested earlier but the user
+                # asked for P90 because it's less sensitive to the tail's
+                # smallest realizations and reads more conservatively).
                 # =============================================================
                 st.subheader(f"Building Counts by Adaptation Effectiveness — Year {target_year}")
                 
@@ -1783,41 +1787,41 @@ def main():
                     
                     ids_s = d_nomit_s.index
                     no_p50 = d_nomit_s['CumEAD_P50'].reindex(ids_s).fillna(0).values
-                    no_p95 = d_nomit_s['CumEAD_P95'].reindex(ids_s).fillna(0).values
-                    wb_p95 = (d_wfpb_s['CumEAD_P95'].reindex(ids_s).fillna(np.nan).values
+                    no_p90 = d_nomit_s['CumEAD_P90'].reindex(ids_s).fillna(0).values
+                    wb_p90 = (d_wfpb_s['CumEAD_P90'].reindex(ids_s).fillna(np.nan).values
                               if not d_wfpb_s.empty else None)
-                    el_p95 = (d_elev_s['CumEAD_P95'].reindex(ids_s).fillna(np.nan).values
+                    el_p90 = (d_elev_s['CumEAD_P90'].reindex(ids_s).fillna(np.nan).values
                               if not d_elev_s.empty else None)
                     
-                    any_damage = no_p95 > thr
+                    any_damage = no_p90 > thr
                     mask_p50   = no_p50 > thr
-                    mask_sev   = no_p95 > thr
+                    mask_sev   = no_p90 > thr
                     
                     mask_wfpb = np.zeros(n_tot_s, dtype=bool)
-                    if wb_p95 is not None:
-                        wb_eff = ~np.isnan(wb_p95) & (wb_p95 <= thr)
+                    if wb_p90 is not None:
+                        wb_eff = ~np.isnan(wb_p90) & (wb_p90 <= thr)
                         mask_wfpb = any_damage & wb_eff
                     
-                    # --- Elevation-eliminates-P95 count (strict direct rule) ---
-                    # A building counts here iff its own Elevate_P95 is at or
+                    # --- Elevation-eliminates-P90 count (strict direct rule) ---
+                    # A building counts here iff its own Elevate_P90 is at or
                     # below the threshold. We deliberately do NOT propagate
                     # WFP-Basement-success buildings into this bucket. The
                     # previous version did, on the rationale that elevation
-                    # cannot be worse than WFP Basement — but the Shinnecock
-                    # data refute that rationale: there are buildings where
-                    # Elevate_P95 substantially exceeds WFP_B_P95 (and even
-                    # WFP_1st_P95), presumably because of how elevation
-                    # interacts with foundation type, content placement, and
-                    # the depth–damage curve at high water levels. Using only
-                    # the direct rule (a) keeps the chart honest about what
-                    # the data actually say, and (b) makes the Distributions
-                    # counts match the strict least-invasive classifier the
-                    # Map tab uses (No Damage → WFP Basement → Elevation →
-                    # Residual), so the same building doesn't get assigned
-                    # one category here and a different one there.
+                    # cannot be worse than WFP Basement — but the data refute
+                    # that rationale: there are buildings where Elevate_P90
+                    # substantially exceeds WFP_B_P90 (and even WFP_1st_P90),
+                    # presumably because of how elevation interacts with
+                    # foundation type, content placement, and the depth–damage
+                    # curve at high water levels. Using only the direct rule
+                    # (a) keeps the chart honest about what the data actually
+                    # say, and (b) makes the Distributions counts match the
+                    # strict least-invasive classifier the Map tab uses
+                    # (No Damage → WFP Basement → Elevation → Residual), so
+                    # the same building doesn't get assigned one category here
+                    # and a different one there.
                     mask_elev_works = np.zeros(n_tot_s, dtype=bool)
-                    if el_p95 is not None:
-                        elev_arr = np.where(np.isnan(el_p95), no_p95, el_p95)
+                    if el_p90 is not None:
+                        elev_arr = np.where(np.isnan(el_p90), no_p90, el_p90)
                         mask_elev_works = any_damage & (elev_arr <= thr)
                     
                     per_scen_stats[slr_key] = {
@@ -1839,7 +1843,7 @@ def main():
                     
                     def _make_paired_bar(title, value_fn, count_fn,
                                          x_left='Median damage > $0',
-                                         x_right='P95 damage > $0',
+                                         x_right='P90 damage > $0',
                                          single_group=False):
                         fig = go.Figure()
                         if single_group:
@@ -1916,7 +1920,7 @@ def main():
                         f"(of {n_tot_max:,} buildings)",
                         _v3, _c3,
                         x_left='Median damage > $0',
-                        x_right='Upper-tail (P95) damage > $0',
+                        x_right='Upper-tail (P90) damage > $0',
                     )
                     st.plotly_chart(fig3, use_container_width=True)
                     
@@ -1929,7 +1933,7 @@ def main():
                         f"Damaged buildings where WFP Basement eliminates "
                         f"upper-tail damage by {target_year}",
                         _v4, _c4,
-                        x_left='WFP Basement eliminates P95 damage',
+                        x_left='WFP Basement eliminates P90 damage',
                         single_group=True,
                     )
                     
@@ -1941,7 +1945,7 @@ def main():
                         f"Damaged buildings where Elevation eliminates "
                         f"upper-tail damage by {target_year}",
                         _v5, _c5,
-                        x_left='Elevation eliminates P95 damage',
+                        x_left='Elevation eliminates P90 damage',
                         single_group=True,
                     )
                     
@@ -1961,10 +1965,10 @@ def main():
                         tbl_rows.append({
                             'SLR Scenario':              s['label'],
                             'Buildings':                 f"{s['n_tot']:,}",
-                            'Damaged (P95 > $0)':        f"{s['n_sev_dmg']:,}  ({100*s['n_sev_dmg']/s['n_tot']:.1f}%)" if s['n_tot'] else "—",
+                            'Damaged (P90 > $0)':        f"{s['n_sev_dmg']:,}  ({100*s['n_sev_dmg']/s['n_tot']:.1f}%)" if s['n_tot'] else "—",
                             'Damaged (median > $0)':     f"{s['n_p50_dmg']:,}  ({100*s['n_p50_dmg']/s['n_tot']:.1f}%)" if s['n_tot'] else "—",
-                            'WFP Basement eliminates P95':   f"{s['n_wfpb']:,}  ({100*s['n_wfpb']/nd:.1f}%)" if nd > 0 else "—",
-                            'Elevation eliminates P95':      f"{s['n_elev']:,}  ({100*s['n_elev']/nd:.1f}%)" if nd > 0 else "—",
+                            'WFP Basement eliminates P90':   f"{s['n_wfpb']:,}  ({100*s['n_wfpb']/nd:.1f}%)" if nd > 0 else "—",
+                            'Elevation eliminates P90':      f"{s['n_elev']:,}  ({100*s['n_elev']/nd:.1f}%)" if nd > 0 else "—",
                         })
                     if tbl_rows:
                         st.markdown("**Per-scenario summary**")
@@ -1972,14 +1976,14 @@ def main():
                                      use_container_width=True, hide_index=True)
                     
                     st.caption(
-                        "Per-building counts use the **P95** of the per-building cumulative damage as "
-                        "the upper-tail proxy (the workshop visualization uses P90). "
+                        "Per-building counts use the **P90** of the per-building cumulative damage as "
+                        "the upper-tail proxy (matching the workshop visualization convention). "
                         "The **damaged-buildings chart** shows the share of buildings with median "
-                        "damage greater than zero and the share with P95 damage greater than zero. "
+                        "damage greater than zero and the share with P90 damage greater than zero. "
                         "The **WFP Basement chart** shows, among buildings that experience any "
-                        "damage, the share for which wet-floodproofing the basement brings P95 "
+                        "damage, the share for which wet-floodproofing the basement brings P90 "
                         "damage to ≤ $1k. The **Elevation chart** shows the share for which "
-                        "elevation alone brings P95 damage to ≤ $1k — the direct, strict rule, "
+                        "elevation alone brings P90 damage to ≤ $1k — the direct, strict rule, "
                         "which matches the Map tab's least-invasive classifier "
                         "(No Damage → WFP Basement → Elevation → Residual)."
                     )
@@ -2043,18 +2047,18 @@ def main():
                 # map view colors by, otherwise we hide buildings the user
                 # would expect to see:
                 #   * Damage Heatmap        → P50 (what the heatmap colors)
-                #   * Damage Bins           → P95 (the bins are upper-tail)
-                #   * Adaptation Effective. → P95 (categories are P95-based)
+                #   * Damage Bins           → P90 (the bins are upper-tail)
+                #   * Adaptation Effective. → P90 (categories are P90-based)
                 # In particular, for the bins/effectiveness views, hiding by
                 # P50 silently drops every building with P50 = 0 but
-                # P95 > $1k — the very buildings that drive tail-risk
-                # planning. Many Shinnecock buildings fall in that bracket.
+                # P90 > $1k — the very buildings that drive tail-risk
+                # planning.
                 if map_view == "Damage Heatmap":
                     zero_filter_col = 'No mitigation_P50' if 'No mitigation_P50' in df_map.columns else None
                 else:
-                    # P95 view — fall back to P50 only if P95 isn't loaded
+                    # Upper-tail view — fall back to P50 only if P90 isn't loaded
                     zero_filter_col = (
-                        'No mitigation_P95' if 'No mitigation_P95' in df_map.columns
+                        'No mitigation_P90' if 'No mitigation_P90' in df_map.columns
                         else 'No mitigation_P50' if 'No mitigation_P50' in df_map.columns
                         else None
                     )
@@ -2113,67 +2117,66 @@ def main():
                     df_map['_is_nonres'] = is_nonres_series.values
                     
                     # ---- Build the standard hover text (shared across all views) ----
-                    # Header line: prefer street address when available, fall
-                    # back to building ID. Address comes from the NSI (66/270
-                    # Shinnecock buildings have it; field is None elsewhere).
+                    # Hover text is duplicated across every map trace × every
+                    # building, so each byte multiplies into the JSON payload.
+                    # We keep the new NSI fields (address, year built, etc.)
+                    # but render them compactly so even ~5,000-building
+                    # locations stay well under Streamlit's per-chart JSON
+                    # limit (~3 MB before the frontend starts truncating).
                     hover_texts = []
                     for idx, row in df_map.iterrows():
                         addr = row.get('address') if 'address' in row else None
                         if pd.notna(addr) and str(addr).strip():
-                            text = f"<b>{addr}</b><br><span style='color:#94a3b8'>#{row['id']}</span><br>"
+                            text = f"<b>{addr}</b> <span style='color:#94a3b8'>#{row['id']}</span><br>"
                         else:
                             text = f"<b>Building #{row['id']}</b><br>"
                         
-                        # Type / occupancy
-                        if 'occupancy_type' in row:
-                            text += f"Type: {row['occupancy_type']}"
-                            # Stories / area inline so the hover stays compact
-                            extras = []
-                            if 'number_of_stories' in row and pd.notna(row['number_of_stories']):
-                                extras.append(f"{int(row['number_of_stories'])} st.")
-                            if 'area' in row and pd.notna(row['area']):
-                                extras.append(f"{int(row['area']):,} sf")
-                            if extras:
-                                text += " · " + " · ".join(extras)
-                            text += "<br>"
-                        # Foundation / year built
-                        fnd_bits = []
+                        # One compact attribute line: type · stories · sqft · foundation · year
+                        attr_bits = []
+                        if 'occupancy_type' in row and pd.notna(row.get('occupancy_type')):
+                            attr_bits.append(str(row['occupancy_type']))
+                        if 'number_of_stories' in row and pd.notna(row.get('number_of_stories')):
+                            attr_bits.append(f"{int(row['number_of_stories'])}-story")
+                        if 'area' in row and pd.notna(row.get('area')):
+                            attr_bits.append(f"{int(row['area']):,} sqft")
                         if 'foundation_type' in row and pd.notna(row.get('foundation_type')):
-                            fnd_bits.append(f"foundation {row['foundation_type']}")
+                            attr_bits.append(f"fnd {row['foundation_type']}")
                         if 'year_built' in row and pd.notna(row.get('year_built')):
-                            fnd_bits.append(f"built {int(row['year_built'])}")
-                        if fnd_bits:
-                            text += " · ".join(fnd_bits) + "<br>"
+                            attr_bits.append(f"{int(row['year_built'])}")
+                        if attr_bits:
+                            text += " · ".join(attr_bits) + "<br>"
                         
+                        # One compact value line: structure value + DFE status
+                        val_bits = []
                         if 'structure_value' in row and pd.notna(row['structure_value']):
-                            text += f"Structure Value: {format_currency(row['structure_value'])}<br>"
-                        if 'Floodplain_Status' in row:
-                            text += f"DFE Status: {row['Floodplain_Status']}<br>"
+                            val_bits.append(f"{format_currency(row['structure_value'])}")
+                        if 'Floodplain_Status' in row and pd.notna(row.get('Floodplain_Status')):
+                            val_bits.append(str(row['Floodplain_Status']))
+                        if val_bits:
+                            text += " · ".join(val_bits) + "<br>"
                         
-                        text += "<br><b>━━━ Cumulative Damage ━━━</b><br>"
+                        text += "<br><b>Cumulative Damage by strategy</b><br>"
                         
                         baseline_val = row.get('No mitigation_P50', 0)
                         for col in action_cols_p50:
                             action_name = col.replace('_P50', '')
                             val = row.get(col, 0)
                             
-                            display_name = action_name.replace('_', ' ')
+                            display_name = action_name
                             if action_name == 'WFP B':
-                                display_name = 'Wet Floodproof Basement'
+                                display_name = 'WFP Basement'
                             elif action_name == 'WFP 1st':
-                                display_name = 'Wet Floodproof 1st Floor'
-                            elif action_name == 'Raise Utilities':
-                                display_name = 'Raise Utilities'
+                                display_name = 'WFP 1st Floor'
                             
                             if action_name == 'No mitigation':
-                                text += f"🔴 <b>{display_name}</b>: {format_currency(val)}<br>"
+                                text += f"<b>No Mitigation</b>: {format_currency(val)}<br>"
                             else:
                                 savings = baseline_val - val if baseline_val > 0 else 0
                                 pct = (savings / baseline_val * 100) if baseline_val > 0 else 0
                                 if savings > 0:
-                                    text += f"🟢 {display_name}: {format_currency(val)} <i>(-{pct:.0f}%)</i><br>"
+                                    text += f"{display_name}: {format_currency(val)} (-{pct:.0f}%)<br>"
                                 else:
-                                    text += f"⚪ {display_name}: {format_currency(val)}<br>"
+                                    text += f"{display_name}: {format_currency(val)}<br>"
                         
                         hover_texts.append(text)
                     df_map['hover_text'] = hover_texts
@@ -2269,16 +2272,18 @@ def main():
                     # for the MATLAB script's P90.
                     # =====================================================
                     elif map_view == "Adaptation Effectiveness":
-                        # Required columns
-                        col_nomit = 'No mitigation_P95'
-                        col_wfpb  = 'WFP B_P95'
-                        col_elev  = 'Elevate_P95'
+                        # Required columns — P90 is the upper-tail proxy
+                        # (matches the Distributions tab and the workshop
+                        # convention).
+                        col_nomit = 'No mitigation_P90'
+                        col_wfpb  = 'WFP B_P90'
+                        col_elev  = 'Elevate_P90'
                         
                         missing = [c for c in (col_nomit, col_wfpb, col_elev)
                                    if c not in df_map.columns]
                         if missing:
                             st.warning(
-                                f"This view needs P95 columns for No mitigation, WFP B, and Elevate. "
+                                f"This view needs P90 columns for No mitigation, WFP B, and Elevate. "
                                 f"Missing: {', '.join(missing)}"
                             )
                         else:
@@ -2297,7 +2302,7 @@ def main():
                             
                             # --- MAP classifier (strict direct rule) ---
                             # The map shows, for each building, the LEAST-INVASIVE
-                            # adaptation that eliminates P95 damage. The Elevation
+                            # adaptation that eliminates P90 damage. The Elevation
                             # category is only assigned to buildings where WFP Basement
                             # is NOT sufficient but Elevation is. This is the same
                             # logic as the original MATLAB generate_action_animation.m.
@@ -2379,7 +2384,10 @@ def main():
                     # Ported from generate_damage_animation_v3.m
                     # =====================================================
                     elif map_view == "Damage Bins":
-                        col_nomit = 'No mitigation_P95'
+                        # P90 is the upper-tail proxy here, matching
+                        # compute_damage_bin_breaks() above and the
+                        # Distributions tab's classifier.
+                        col_nomit = 'No mitigation_P90'
                         if col_nomit not in df_map.columns:
                             st.warning(f"This view needs the '{col_nomit}' column.")
                         else:
@@ -2413,7 +2421,7 @@ def main():
                             else:
                                 # ---- Stable bin breakpoints across all years ----
                                 # Computed once from the pooled distribution of
-                                # nonzero No-Mit P95 damages over every year for
+                                # nonzero No-Mit P90 damages over every year for
                                 # the selected SLR scenario, so the same building
                                 # gets the same bin color regardless of which
                                 # year is active. Bins recompute when the user
@@ -2601,19 +2609,19 @@ def main():
                     elif map_view == "Adaptation Effectiveness":
                         st.caption(
                             "Each building is colored by the **least-invasive** adaptation that "
-                            "eliminates its upper-tail (P95) cumulative damage under the selected "
+                            "eliminates its upper-tail (P90) cumulative damage under the selected "
                             "year and SLR scenario. Categories are checked in order: "
-                            "**No Damage** (P95 baseline ≤ $1k) → "
-                            "**WFP Basement** (wet floodproofing the basement brings P95 to ≤ $1k) → "
-                            "**Elevation** (WFP Basement isn't sufficient but elevating the structure brings P95 to ≤ $1k) → "
-                            "**Residual Damage** (even elevation doesn't bring P95 to ≤ $1k). "
+                            "**No Damage** (P90 baseline ≤ $1k) → "
+                            "**WFP Basement** (wet floodproofing the basement brings P90 to ≤ $1k) → "
+                            "**Elevation** (WFP Basement isn't sufficient but elevating the structure brings P90 to ≤ $1k) → "
+                            "**Residual Damage** (even elevation doesn't bring P90 to ≤ $1k). "
                             "Each building appears in exactly one color, and the legend counts "
                             "partition the total — they don't overlap. Non-residential buildings are "
                             "marked with a black ring."
                         )
                     elif map_view == "Damage Bins":
                         st.caption(
-                            "Each building is colored by its No-Mitigation P95 cumulative damage. " +
+                            "Each building is colored by its No-Mitigation P90 cumulative damage. " +
                             bin_caption_extra +
                             " Non-residential buildings are marked with a black ring."
                         )
@@ -3548,9 +3556,12 @@ def main():
                         "computed directly from the 1,000-realization Monte Carlo ensemble."
                     )
                     
-                    # Available years from the bundle metadata (or fall back
-                    # to the years present in the per-building damage table).
-                    target_years_local = sorted(df_traj['TargetYear'].unique())
+                    # Available years from the per-building damage table.
+                    # We use df_building (defined above) rather than df_traj
+                    # (which is defined later in the trajectory section);
+                    # both have the same TargetYear values, but df_traj
+                    # isn't in scope here.
+                    target_years_local = sorted(df_building['TargetYear'].unique())
                     
                     exp_rows = []
                     for slr_key, slr_label in (('50th-percentile', 'Median SLR (P50)'),
@@ -3594,6 +3605,96 @@ def main():
                             "decision-relevant counterpart to the cumulative-damage "
                             "estimates below. Years and SLR trajectories use the "
                             "same MC realizations that fed the damage chain."
+                        )
+                
+                # ----------------------------------------------------------
+                # Flood depth at building location
+                # ----------------------------------------------------------
+                # Companion to the exposure panel, but framed in depth (ft)
+                # rather than probability. We sample three percentiles of
+                # the simulated annual-maximum stillwater distribution
+                # under the SIDEBAR-SELECTED SLR scenario and convert each
+                # to a flood depth at the building by subtracting the
+                # ground elevation. Percentiles match the user's spec:
+                #   * Yearly      → P01 of annual max  (level the property
+                #                   sees in ~99 % of years)
+                #   * 10 % chance → P10 of annual max
+                #   * 1  % chance → P99 of annual max  (≈ 100-year flood)
+                # Negative values are clipped to zero (site stays dry).
+                ground_elev = building_info.get('ground_elevation')
+                mc_for_scenario = wl_data.get(f'{scenario}_mc')
+                target_years_local = sorted(df_building['TargetYear'].unique())
+                if (pd.notna(ground_elev)
+                        and mc_for_scenario is not None
+                        and 'Year' in mc_for_scenario.columns
+                        and target_years_local):
+                    st.divider()
+                    scen_pretty = {
+                        '50th-percentile': 'Median SLR (P50)',
+                        '90th-percentile': 'High-End SLR (P90)',
+                    }.get(scenario, scenario)
+                    st.subheader(f"Flood depth at this building — {scen_pretty}")
+                    st.caption(
+                        f"Annual-maximum stillwater **flood depth above ground** "
+                        f"at this property (ground elevation: "
+                        f"**{float(ground_elev):.2f} ft NAVD88**) under the "
+                        f"{scen_pretty.lower()} trajectory. The three depth "
+                        f"columns sample the simulated annual-maximum "
+                        f"distribution at three return-period proxies. "
+                        f"Negative values are clipped to zero (site stays dry)."
+                    )
+                    
+                    # (column-label, percentile)
+                    pct_specs = [
+                        ('Yearly (P01)',     1),
+                        ('10% chance (P10)', 10),
+                        ('1% chance (P99)',  99),
+                    ]
+                    
+                    fd_rows = []
+                    mc_cols_fd = [c for c in mc_for_scenario.columns
+                                  if c.startswith('MC_')]
+                    for yr in target_years_local:
+                        yr_mc = mc_for_scenario[mc_for_scenario['Year'] == int(yr)]
+                        if yr_mc.empty or not mc_cols_fd:
+                            continue
+                        arr = yr_mc[mc_cols_fd].to_numpy(dtype=float).flatten()
+                        if arr.size == 0:
+                            continue
+                        # Build a "Year" cell that uses the bundle label when
+                        # one exists (so 2025 reads "Potential (2025)") and
+                        # falls back to the bare year otherwise.
+                        yr_int = int(yr)
+                        yr_lbl = target_year_labels.get(yr_int, str(yr_int))
+                        year_display = (f"{yr_lbl} ({yr_int})"
+                                        if yr_lbl != str(yr_int) else str(yr_int))
+                        row = {'Year': year_display}
+                        for col_label, pct in pct_specs:
+                            wl = float(np.percentile(arr, pct))
+                            depth = wl - float(ground_elev)
+                            wl_cell = f"{wl:.2f}"
+                            if depth <= 0:
+                                row[col_label] = f"Dry  (WL {wl_cell})"
+                            else:
+                                row[col_label] = f"{depth:.2f} ft  (WL {wl_cell})"
+                        fd_rows.append(row)
+                    
+                    if fd_rows:
+                        st.dataframe(pd.DataFrame(fd_rows),
+                                     use_container_width=True, hide_index=True)
+                        st.caption(
+                            "Each cell shows **flood depth above ground (ft)** "
+                            "with the corresponding **stillwater level (ft NAVD88)** "
+                            "in parentheses. Depths are computed from this "
+                            "building's ground elevation and the simulated "
+                            "annual-maximum water-level percentile under the "
+                            "selected SLR scenario; switch SLR in the sidebar "
+                            "to compare. "
+                            "*Note:* the three return-period proxies use "
+                            "P01 / P10 / P99 of the annual-maximum distribution "
+                            "as you specified — let me know if you'd prefer "
+                            "P50 / P90 / P99 (the standard engineering reading "
+                            "of \"yearly / 10-year / 100-year\")."
                         )
                 
                 st.divider()
