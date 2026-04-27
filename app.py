@@ -856,11 +856,14 @@ def _nice_scalebar_meters(target_m):
 def build_publication_map_figure(fig_map, *, location, occupancy, target_year,
                                  scenario_label, map_view, df_map,
                                  width_px=2400, height_px=1800,
-                                 mapbox_style="open-street-map"):
+                                 mapbox_style="open-street-map",
+                                 center_lat_override=None,
+                                 center_lon_override=None,
+                                 zoom_override=None):
     """Return a deep-copied version of ``fig_map`` styled for publication:
     embedded title, credits footer, north arrow, and a geographically-correct
     scale bar. The original interactive figure is left untouched.
-
+    
     Parameters
     ----------
     fig_map : plotly.graph_objects.Figure
@@ -878,13 +881,19 @@ def build_publication_map_figure(fig_map, *, location, occupancy, target_year,
         Plotly mapbox style. ``open-street-map`` is the default and ships
         OSM tiles for free; ``carto-positron`` and ``carto-darkmatter`` are
         also free. Other styles may require a Mapbox token.
+    center_lat_override, center_lon_override, zoom_override : float | None
+        If any of these is provided, override the bbox-fit framing. All
+        three are optional and independent — if only some are passed,
+        the rest still come from bbox-fit. This is the WYSIWYG knob: the
+        export panel exposes these so users can match what they're looking
+        at on the live map.
     """
     import copy
     import math
     from datetime import date as _date
-
+    
     fig = copy.deepcopy(fig_map)
-
+    
     # ----- Frame the data: bbox-fit center + zoom (don't trust live map) -----
     lats = df_map['latitude'].dropna().to_numpy()
     lons = df_map['longitude'].dropna().to_numpy()
@@ -913,6 +922,14 @@ def build_publication_map_figure(fig_map, *, location, occupancy, target_year,
         center_lat = float(np.nanmean(lats)) if len(lats) else 40.86
         center_lon = float(np.nanmean(lons)) if len(lons) else -72.49
         zoom = 12.0
+    
+    # User-supplied overrides win when present (WYSIWYG path).
+    if center_lat_override is not None:
+        center_lat = float(center_lat_override)
+    if center_lon_override is not None:
+        center_lon = float(center_lon_override)
+    if zoom_override is not None:
+        zoom = float(zoom_override)
 
     # ----- Build the scale bar (paper-coord shapes anchored to the map area) -----
     # We previously drew the bar as a mapbox layer (geographic LineString),
@@ -2342,22 +2359,45 @@ def main():
                             wfpb   = np.where(np.isnan(wfpb_raw), no_mit, wfpb_raw)
                             elev   = np.where(np.isnan(elev_raw), no_mit, elev_raw)
                             
-                            # --- MAP classifier (strict direct rule) ---
-                            # The map shows, for each building, the LEAST-INVASIVE
-                            # adaptation that eliminates P90 damage. The Elevation
-                            # category is only assigned to buildings where WFP Basement
-                            # is NOT sufficient but Elevation is. This is the same
-                            # logic as the original MATLAB generate_action_animation.m.
-                            wfpb_direct = wfpb <= thr
-                            elev_direct = elev <= thr
+                            # --- MAP classifier (dominance rule) ---
+                            # Earlier the Elevation bucket required Elevate ≤
+                            # threshold AND WFP B > threshold. With this MC
+                            # ensemble that bar is too high — for most
+                            # damaged In-floodplain buildings neither retrofit
+                            # gets P90 below $1k, even though Elevate is
+                            # substantially more effective than WFP B (median
+                            # P90 ~$27k vs ~$41k on Mastic Beach 2055-50th).
+                            # We now classify by which retrofit is most
+                            # effective, not which one crosses an arbitrary
+                            # threshold:
+                            #   1 = No Damage      (baseline ≤ threshold)
+                            #   2 = WFP Basement   (damaged AND WFP B ≤ threshold —
+                            #                       the cheapest fix that "eliminates"
+                            #                       damage)
+                            #   3 = Elevation      (damaged AND WFP B > threshold AND
+                            #                       Elevate strictly beats WFP B —
+                            #                       elevation provides meaningful
+                            #                       additional protection)
+                            #   4 = Residual       (damaged AND WFP B > threshold AND
+                            #                       Elevate ≥ WFP B — neither retrofit
+                            #                       does meaningfully better than the
+                            #                       other; consider buyout / non-retrofit
+                            #                       options)
+                            # NB: the dominance rule auto-handles the MATLAB
+                            # convention where Elevate is set to baseline for
+                            # already-Above-DFE buildings — those buildings
+                            # have Elevate ≥ WFP B by construction, so they
+                            # never qualify for the Elevation bucket here.
+                            wfpb_to_thr        = wfpb <= thr
+                            elev_dominates_wfpb = elev < wfpb
                             
                             # Priority classification (controls both marker COLOR and
                             # the LEGEND count on the map):
                             #   1 = No Damage  > 2 = WFP Basement > 3 = Elevation > 4 = Residual
                             cat = np.full(len(df_map), 4, dtype=int)
                             cat[no_mit <= thr] = 1
-                            cat[(no_mit > thr) & wfpb_direct] = 2
-                            cat[(no_mit > thr) & ~wfpb_direct & elev_direct] = 3
+                            cat[(no_mit > thr) & wfpb_to_thr] = 2
+                            cat[(no_mit > thr) & ~wfpb_to_thr & elev_dominates_wfpb] = 3
                             
                             df_map['_cat_action'] = cat
                             
@@ -2650,13 +2690,17 @@ def main():
                         )
                     elif map_view == "Adaptation Effectiveness":
                         st.caption(
-                            "Each building is colored by the **least-invasive** adaptation that "
-                            "eliminates its upper-tail (P90) cumulative damage under the selected "
+                            "Each building is colored by the **most effective adaptation** "
+                            "for its upper-tail (P90) cumulative damage under the selected "
                             "year and SLR scenario. Categories are checked in order: "
-                            "**No Damage** (P90 baseline ≤ $1k) → "
-                            "**WFP Basement** (wet floodproofing the basement brings P90 to ≤ $1k) → "
-                            "**Elevation** (WFP Basement isn't sufficient but elevating the structure brings P90 to ≤ $1k) → "
-                            "**Residual Damage** (even elevation doesn't bring P90 to ≤ $1k). "
+                            "**No Damage** (baseline P90 ≤ $1k — no intervention needed) → "
+                            "**WFP Basement** (basement floodproofing brings P90 ≤ $1k — "
+                            "the cheapest fix that eliminates damage) → "
+                            "**Elevation** (WFP Basement isn't sufficient, but elevation "
+                            "strictly outperforms WFP Basement on P90 — elevation provides "
+                            "meaningful additional protection) → "
+                            "**Residual Damage** (neither retrofit beats the other — "
+                            "consider buyout or other non-retrofit options). "
                             "Each building appears in exactly one color, and the legend counts "
                             "partition the total — they don't overlap. Non-residential buildings are "
                             "marked with a black ring."
@@ -2726,25 +2770,93 @@ def main():
                                 help="Multiplier on rendered pixel density. 2× ≈ 300 DPI; "
                                      "3× ≈ 450 DPI. SVG/PDF ignore this (always vector)."
                             )
-                        # Second row: basemap choice
+                        # Second row: basemap choice. We deliberately omit
+                        # "open-street-map" here because OSM's tile servers
+                        # block headless render requests (kaleido's bundled
+                        # browser doesn't send the Referer header OSM's tile
+                        # usage policy requires), so an OSM export consistently
+                        # comes back peppered with "Access blocked" tiles.
+                        # The live map can still use OSM — your real browser
+                        # supplies the Referer there. For exports use Carto
+                        # (which has no such restriction) or the white-bg
+                        # option.
                         export_basemap = st.selectbox(
                             "Basemap (printed export only)",
                             options=[
-                                "open-street-map",
                                 "carto-positron",
                                 "carto-darkmatter",
                                 "white-bg (no basemap)",
                             ],
-                            index=1,   # carto-positron is the cleanest print default
+                            index=0,   # carto-positron is the cleanest print default
                             key="map_export_basemap",
                             help="Tile-based basemaps need internet access at export time; "
                                  "if a tile server refuses the request the export will "
                                  "auto-fall-back to a white background. `carto-positron` "
                                  "(light, neutral) and `carto-darkmatter` (dark) are the "
                                  "preferred print styles. Pick `white-bg` for a guaranteed-"
-                                 "working export with no roads/labels — useful when the "
-                                 "underlying geography is provided by a separate base layer."
+                                 "working export with no roads/labels. OpenStreetMap is "
+                                 "intentionally excluded — its tile servers block headless "
+                                 "render requests, so OSM exports come back covered in "
+                                 "'Access blocked' tiles."
                         )
+                        
+                        # Third row: framing override.
+                        # Default behavior is auto-fit-to-data; "Custom" lets
+                        # the user dial in center/zoom to match their live
+                        # map view (Streamlit doesn't surface Plotly pan/zoom
+                        # state back to Python, so a manual override is the
+                        # most reliable WYSIWYG path).
+                        st.markdown("**Map framing**")
+                        # Bbox-fit defaults so the user can tweak from there
+                        # rather than starting from scratch.
+                        _df_lat = df_map['latitude'].dropna()
+                        _df_lon = df_map['longitude'].dropna()
+                        _bbox_lat = float(_df_lat.mean()) if len(_df_lat) else 40.86
+                        _bbox_lon = float(_df_lon.mean()) if len(_df_lon) else -72.49
+                        frame_mode = st.radio(
+                            "Frame",
+                            options=["Auto-fit data (default)", "Custom center & zoom"],
+                            index=0, horizontal=True,
+                            key="map_export_frame_mode",
+                            help="Auto-fit centers on the data bbox and chooses a zoom "
+                                 "that shows everything. Custom lets you set the center "
+                                 "and zoom — useful when you've panned/zoomed in the live "
+                                 "map and want the export to match. (Streamlit doesn't "
+                                 "expose the live map's current pan/zoom back to Python, "
+                                 "so this is the most reliable way to get WYSIWYG.)"
+                        )
+                        custom_center_lat = None
+                        custom_center_lon = None
+                        custom_zoom = None
+                        if frame_mode == "Custom center & zoom":
+                            fc1, fc2, fc3 = st.columns(3)
+                            with fc1:
+                                custom_center_lat = st.number_input(
+                                    "Center latitude (°N)",
+                                    value=_bbox_lat, format="%.4f", step=0.001,
+                                    key="map_export_center_lat",
+                                )
+                            with fc2:
+                                custom_center_lon = st.number_input(
+                                    "Center longitude (°E)",
+                                    value=_bbox_lon, format="%.4f", step=0.001,
+                                    key="map_export_center_lon",
+                                )
+                            with fc3:
+                                custom_zoom = st.number_input(
+                                    "Zoom level",
+                                    min_value=1.0, max_value=20.0,
+                                    value=13.0, step=0.5,
+                                    key="map_export_zoom",
+                                    help="Web Mercator zoom: 11≈town, 13≈neighborhood, "
+                                         "15≈street level. Increase to zoom in.",
+                                )
+                            st.caption(
+                                "💡 *To match your current map view: hover the live map "
+                                "to read coordinates near the center, copy them here, and "
+                                "pick a zoom that frames the same area. Generate, inspect, "
+                                "adjust if needed.*"
+                            )
                         
                         # Parse selections
                         _fmt_map = {"PNG (raster)": "png", "PDF (vector)": "pdf", "SVG (vector)": "svg"}
@@ -2775,6 +2887,9 @@ def main():
                                     df_map=df_map,
                                     width_px=ex_w, height_px=ex_h,
                                     mapbox_style=export_basemap_value,
+                                    center_lat_override=custom_center_lat,
+                                    center_lon_override=custom_center_lon,
+                                    zoom_override=custom_zoom,
                                 )
                                 img_bytes, mime, ext, info = export_map_image(
                                     pub_fig, fmt=fmt, scale=int(export_scale),
