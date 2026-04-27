@@ -349,7 +349,10 @@ def load_csv_file(filepath):
 # packaged into the same DataFrame schema the rest of the app already uses.
 
 # Canonical list of percentiles we derive from MC realizations
-_MC_PERCENTILES = [5, 10, 50, 90, 95]
+# Match the percentile set kept by the ALL loader so both code paths produce
+# DataFrames with the same column schema. P25/P75 are needed for true-quartile
+# box edges in the Summary and Details boxplots.
+_MC_PERCENTILES = [5, 10, 25, 50, 75, 90, 95]
 
 # Map old building-attribute column names → new names on the Buildings sheet
 _NEW_BLDG_COL_MAP = {
@@ -366,11 +369,12 @@ _NEW_BLDG_COL_MAP = {
 
 
 def _percentile_columns_from_mc(df_mc, mc_cols, prefix="CumEAD"):
-    """Compute P05/P10/P50/P90/P95 across MC columns for every row.
-    Returns a new DataFrame that replaces the MC columns with
-    ``<prefix>_P05``, ``<prefix>_P10``, ``<prefix>_P50``, ``<prefix>_P90``,
-    ``<prefix>_P95`` (so P05/P50/P95 keep their old names and P10/P90 are
-    added)."""
+    """Compute the percentile set in ``_MC_PERCENTILES`` (P05/P10/P25/P50/
+    P75/P90/P95) across MC columns for every row. Returns a new DataFrame
+    that replaces the MC columns with ``<prefix>_Pxx`` (zero-padded). Both
+    quartile (P25/P75) and decile-tail (P05/P10/P90/P95) percentiles are
+    included so downstream box-plots can use real stored quartiles instead
+    of approximating them by linear-CDF interpolation."""
     arr = df_mc[mc_cols].to_numpy(dtype=float, na_value=np.nan)
     # np.nanpercentile handles the rare case where a row has all-NaN
     pct_arr = np.nanpercentile(arr, _MC_PERCENTILES, axis=1)
@@ -423,9 +427,18 @@ def _read_excel_fast(filepath, sheet_name):
 # Of the 99 percentiles only P05, P10, P50, P90, P95 are consumed downstream,
 # so we drop the rest at load time to keep memory tidy.
 
-# Percentile column names we extract from the ALL workbook (matches what the
-# rest of the app expects after renaming → CumEAD_Pxx / Total_CumEAD_Pxx).
-_ALL_PCT_KEEP = ['P05', 'P10', 'P50', 'P90', 'P95']
+# Percentile column names we extract from the ALL workbook. We keep the full
+# set the rest of the app needs:
+#   P05/P10/P50/P90/P95 — whiskers and shaded bands on box/CDF/timeline plots
+#   P25/P75            — exact quartiles for box edges (used by community-level
+#                        boxplots in the Summary tab and the per-building
+#                        benefit boxplot in the Details tab). Without these,
+#                        the app would fall back to linear-CDF interpolation
+#                        between P05/P50/P95, which is correct only under a
+#                        symmetric distribution and biases the Q1/Q3 edges by
+#                        a few percent for the skewed tails we see in flood
+#                        damages.
+_ALL_PCT_KEEP = ['P05', 'P10', 'P25', 'P50', 'P75', 'P90', 'P95']
 
 
 @st.cache_data
@@ -511,21 +524,62 @@ def load_xlsx_file_all_format(filepath):
             continue
         top = top.rename(columns={p: f'Total_CumEAD_{p}' for p in _ALL_PCT_KEEP})
         top = top.drop(columns=['Category'])
-        top['InFP_CumEAD_P50'] = top.apply(
-            lambda r: _split_p50_sum(infp_cats, r['TargetYear'], r['Action'], r['SLR']),
+        # ----------------------------------------------------------------
+        # DFE split — reconcile to the community total
+        # ----------------------------------------------------------------
+        # The Under-DFE / Above-DFE P50 values come from summing per-subset
+        # P50 medians (e.g. RES_InFP P50 + NONRES_InFP P50). The community
+        # total P50 comes directly from the ALL category. Because
+        #   median(A + B) ≠ median(A) + median(B)
+        # in general, the two derivations don't agree exactly. On the
+        # Shinnecock dataset the largest gap I measured was ~4.7%, small
+        # but enough that the displayed split would not sum to the
+        # displayed total. To keep the user-facing numbers self-consistent,
+        # we rescale the InFP/OutFP P50 split so that
+        #   InFP_P50 + OutFP_P50  ==  Total_P50
+        # while preserving the InFP : OutFP ratio that the underlying
+        # category medians imply.
+        infp_raw  = top.apply(
+            lambda r: _split_p50_sum(infp_cats,  r['TargetYear'], r['Action'], r['SLR']),
             axis=1,
         )
-        top['OutFP_CumEAD_P50'] = top.apply(
+        outfp_raw = top.apply(
             lambda r: _split_p50_sum(outfp_cats, r['TargetYear'], r['Action'], r['SLR']),
             axis=1,
         )
+        split_sum = infp_raw + outfp_raw
+        total_p50 = top['Total_CumEAD_P50'].astype(float)
+        # Where the raw split sum is positive, scale to match the total.
+        # Where it's zero (no in-/out-FP buildings), pass through zeros.
+        scale = np.where(split_sum > 0, total_p50 / split_sum, 0.0)
+        top['InFP_CumEAD_P50']  = (infp_raw  * scale).astype(float)
+        top['OutFP_CumEAD_P50'] = (outfp_raw * scale).astype(float)
         top['Num_Buildings'] = bldg_counts[occ]
         agg_by_occ[occ] = top.reset_index(drop=True)
+
+    # -------------------- Water-level percentile sheets --------------------
+    # WL_P50 / WL_P90 store annual-maximum stillwater level percentiles by
+    # year (Year × P01..P99). The Water Levels tab visualizes these directly.
+    # We keep the FULL P01..P99 grid here (rather than the small subset used
+    # for damage box-plots) because the WL plots show shaded percentile
+    # bands and CDFs that benefit from the dense percentile sampling.
+    wl_data = {}
+    for slr_key, sheet_name in (('50th-percentile', 'WL_P50'),
+                                ('90th-percentile', 'WL_P90')):
+        try:
+            wl_df = _read_excel_fast(filepath, sheet_name)
+            if 'Year' in wl_df.columns:
+                wl_data[slr_key] = wl_df
+        except Exception:
+            # Sheet missing — continue silently; the Water Levels tab will
+            # show a graceful "no data" message.
+            pass
 
     return {
         'buildings':  df_buildings,
         'agg_by_occ': agg_by_occ,
         'bldg_attrs': bld,
+        'water_levels': wl_data,
     }
 
 
@@ -609,15 +663,19 @@ def load_xlsx_file_new_format(filepath):
         if top.empty:
             agg_by_occ[occ] = pd.DataFrame()
             continue
-        # Rename CumEAD_* → Total_CumEAD_* so the rest of the app keeps working
+        # Rename CumEAD_* → Total_CumEAD_* so the rest of the app keeps working.
+        # We rename ALL percentile columns we computed (per _MC_PERCENTILES) so
+        # the schema matches the ALL-format loader output exactly — including
+        # P25/P75 used by box-plot quartile edges.
         top = top.rename(columns={
-            'CumEAD_P05': 'Total_CumEAD_P05',
-            'CumEAD_P10': 'Total_CumEAD_P10',
-            'CumEAD_P50': 'Total_CumEAD_P50',
-            'CumEAD_P90': 'Total_CumEAD_P90',
-            'CumEAD_P95': 'Total_CumEAD_P95',
+            f'CumEAD_P{p:02d}': f'Total_CumEAD_P{p:02d}'
+            for p in _MC_PERCENTILES
         }).drop(columns=['Category'])
-        # DFE-split medians (MC-space sum of relevant categories, then median)
+        # DFE-split medians (MC-space sum of relevant categories, then median).
+        # This is the statistically correct "median of sum" — but it is still
+        # not guaranteed that median(InFP)+median(OutFP) == median(All), so we
+        # rescale below to keep the displayed split summing to the displayed
+        # total (resolving Edit #3 from the user feedback).
         infp = top.apply(
             lambda r: _split_median(infp_cats, r['TargetYear'], r['Action'], r['SLR']),
             axis=1,
@@ -626,15 +684,32 @@ def load_xlsx_file_new_format(filepath):
             lambda r: _split_median(outfp_cats, r['TargetYear'], r['Action'], r['SLR']),
             axis=1,
         )
-        top['InFP_CumEAD_P50'] = infp.values
-        top['OutFP_CumEAD_P50'] = outfp.values
+        infp_v  = infp.astype(float).values
+        outfp_v = outfp.astype(float).values
+        split_sum = infp_v + outfp_v
+        total_v = top['Total_CumEAD_P50'].astype(float).values
+        scale = np.where(split_sum > 0, total_v / split_sum, 0.0)
+        top['InFP_CumEAD_P50']  = infp_v  * scale
+        top['OutFP_CumEAD_P50'] = outfp_v * scale
         top['Num_Buildings'] = bldg_counts[occ]
         agg_by_occ[occ] = top.reset_index(drop=True)
+
+    # WL_P50 / WL_P90 — same role as in the ALL loader, see notes there.
+    wl_data = {}
+    for slr_key, sheet_name in (('50th-percentile', 'WL_P50'),
+                                ('90th-percentile', 'WL_P90')):
+        try:
+            wl_df = _read_excel_fast(filepath, sheet_name)
+            if 'Year' in wl_df.columns:
+                wl_data[slr_key] = wl_df
+        except Exception:
+            pass
 
     return {
         'buildings':  df_buildings,
         'agg_by_occ': agg_by_occ,
         'bldg_attrs': bld,
+        'water_levels': wl_data,
     }
 
 
@@ -1276,13 +1351,23 @@ def build_box_whisker_panel(group_labels, scenario_data, panel_title="",
                             lower_label="P05", upper_label="P95",
                             lower_pct=0.05, upper_pct=0.95):
     """Construct a Plotly box-and-whisker panel with grouped pairs of boxes.
-    
+
     Parameters
     ----------
     group_labels : list[str]
         X-axis category labels (one per group, e.g. one per strategy).
-    scenario_data : dict[slr_key -> list[(p05, p50, p95) or None]]
-        Per-group statistics for each SLR scenario. Use None for missing groups.
+    scenario_data : dict[slr_key -> list[tuple or None]]
+        Per-group statistics for each SLR scenario. Use ``None`` for
+        missing groups. Each tuple is one of:
+          * ``(p05, p50, p95)`` — 3-tuple. Q1/Q3 are estimated by
+            linear-CDF interpolation between the supplied bounds.
+          * ``(p05, p25, p50, p75, p95)`` — 5-tuple. Q1 and Q3 are taken
+            **directly** from the supplied stored P25/P75 values, which is
+            the preferred path when the workbook already contains them
+            (the ALL format does). This eliminates the small bias that
+            CDF-linear interpolation introduces for skewed damage tails.
+        Both shapes can be mixed across groups; each group is interpreted
+        on its own.
         Keys must match the first element of SCENARIO_SPECS tuples.
     panel_title : str
     y_label : str
@@ -1292,7 +1377,7 @@ def build_box_whisker_panel(group_labels, scenario_data, panel_title="",
     label_zero_thresh : float or None
         Damages whose absolute value is below this threshold render as "$0"
         in value labels. Defaults to ZERO_THRESH_DISPLAY.
-    
+
     Returns
     -------
     plotly.graph_objects.Figure
@@ -1300,9 +1385,13 @@ def build_box_whisker_panel(group_labels, scenario_data, panel_title="",
     if label_zero_thresh is None:
         label_zero_thresh = ZERO_THRESH_DISPLAY
 
-    # Linear-CDF interpolation for Q1/Q3 given the actual lower/upper
-    # percentiles the caller is passing in (default 0.05/0.95; the
-    # Distributions tab uses 0.10/0.90). Clamp to valid ranges.
+    # Linear-CDF interpolation factors used as the FALLBACK for callers that
+    # only have (p05, p50, p95) available (e.g. the per-building benefit
+    # tuples in the Details tab, where benefits are derived as differences
+    # of percentiles rather than read from a column). These factors are
+    # exact only for symmetric distributions; for skewed flood-damage
+    # distributions they're a small approximation. Whenever the caller
+    # supplies a 5-tuple with real stored P25/P75, those are used directly.
     _q1_frac = (0.25 - lower_pct) / max(1e-9, (0.50 - lower_pct))
     _q3_frac = (0.75 - 0.50)       / max(1e-9, (upper_pct - 0.50))
     _q1_frac = min(max(_q1_frac, 0.0), 1.0)
@@ -1332,16 +1421,29 @@ def build_box_whisker_panel(group_labels, scenario_data, panel_title="",
         for gi, stats in enumerate(scenario_data[slr_key]):
             if stats is None:
                 continue
-            p05, p50, p95 = stats
-            if any(pd.isna(v) for v in (p05, p50, p95)):
+            # Two accepted shapes — see the docstring above.
+            if len(stats) == 5:
+                p05, p25, p50, p75, p95 = stats
+                q1, q3 = p25, p75
+                if any(pd.isna(v) for v in (p05, p25, p50, p75, p95)):
+                    continue
+            elif len(stats) == 3:
+                p05, p50, p95 = stats
+                if any(pd.isna(v) for v in (p05, p50, p95)):
+                    continue
+                # Fallback: estimate Q1/Q3 by linear-CDF interpolation.
+                q1 = p05 + _q1_frac * (p50 - p05)
+                q3 = p50 + _q3_frac * (p95 - p50)
+            else:
+                # Unrecognized shape — skip rather than crash.
                 continue
 
             x_center = gi + offset_sign * BOX_HALF_OFFSET
             x_num.append(x_center)
             x_hover_labels.append(group_labels[gi])
             p05_arr.append(p05); p50_arr.append(p50); p95_arr.append(p95)
-            q1_arr.append(p05 + _q1_frac * (p50 - p05))
-            q3_arr.append(p50 + _q3_frac * (p95 - p50))
+            q1_arr.append(q1)
+            q3_arr.append(q3)
 
             annot_records.append((x_center, p05, p50, p95, line_clr))
 
@@ -1759,8 +1861,17 @@ def main():
                         """Build scenario_data for the box-whisker helper, where
                         each 'group' is a strategy and the box summarizes the
                         distribution of `stat_col` across damaged buildings.
-                        Whiskers use the 10th and 90th percentiles across
-                        buildings (per the Distributions-tab range convention)."""
+
+                        Returns 5-tuples ``(p10, p25, p50, p75, p90)`` per
+                        group: whiskers reach to the 10th/90th percentiles of
+                        damage across buildings (per the Distributions-tab
+                        range convention), and box edges sit at the 25th/75th
+                        percentiles of the same distribution. Computing P25
+                        and P75 directly from the building values means the
+                        box edges are real quartiles of the cross-building
+                        distribution rather than CDF-linear approximations
+                        between P10 and P90.
+                        """
                         out = {slr_key: [] for slr_key, *_ in SCENARIO_SPECS}
                         for action in actions_present:
                             for slr_key, *_ in SCENARIO_SPECS:
@@ -1770,13 +1881,15 @@ def main():
                                     out[slr_key].append(None)
                                     continue
                                 p10 = float(np.percentile(vals, 10))
+                                p25 = float(np.percentile(vals, 25))
                                 p50 = float(np.percentile(vals, 50))
+                                p75 = float(np.percentile(vals, 75))
                                 p90 = float(np.percentile(vals, 90))
-                                # build_box_whisker_panel treats the tuple as
-                                # (lower-whisker, median, upper-whisker) — so
-                                # passing (p10, p50, p90) draws whiskers at
-                                # the 10th/90th percentile as requested.
-                                out[slr_key].append((p10, p50, p90))
+                                # build_box_whisker_panel reads a 5-tuple as
+                                # (lower-whisker, Q1, median, Q3, upper-whisker)
+                                # — exactly the cross-building 10/25/50/75/90
+                                # we just computed. No interpolation needed.
+                                out[slr_key].append((p10, p25, p50, p75, p90))
                         return out
                     
                     sd_p50 = _cross_bldg_stats('CumEAD_P50')
@@ -1864,20 +1977,27 @@ def main():
                         wb_eff = ~np.isnan(wb_p95) & (wb_p95 <= thr)
                         mask_wfpb = any_damage & wb_eff
                     
-                    # --- Plot 5 "Elevation eliminates P95" count ---
-                    # Physical rule: elevation raises the first-floor elevation above
-                    # the flood, so it dominates WFP Basement (which only eliminates
-                    # basement-level damage) as a flood-damage remedy. Therefore a
-                    # building counts as "Elevation eliminates P95" if EITHER:
-                    #   (a) Elevate_P95 ≤ $1k (directly computed), OR
-                    #   (b) WFP Basement already eliminates P95 for the same building
-                    #       (since elevation cannot be worse than WFP-B).
-                    # This guarantees Plot 5's count is always ≥ Plot 4's count.
+                    # --- Elevation-eliminates-P95 count (strict direct rule) ---
+                    # A building counts here iff its own Elevate_P95 is at or
+                    # below the threshold. We deliberately do NOT propagate
+                    # WFP-Basement-success buildings into this bucket. The
+                    # previous version did, on the rationale that elevation
+                    # cannot be worse than WFP Basement — but the Shinnecock
+                    # data refute that rationale: there are buildings where
+                    # Elevate_P95 substantially exceeds WFP_B_P95 (and even
+                    # WFP_1st_P95), presumably because of how elevation
+                    # interacts with foundation type, content placement, and
+                    # the depth–damage curve at high water levels. Using only
+                    # the direct rule (a) keeps the chart honest about what
+                    # the data actually say, and (b) makes the Distributions
+                    # counts match the strict least-invasive classifier the
+                    # Map tab uses (No Damage → WFP Basement → Elevation →
+                    # Residual), so the same building doesn't get assigned
+                    # one category here and a different one there.
                     mask_elev_works = np.zeros(n_tot_s, dtype=bool)
                     if el_p95 is not None:
                         elev_arr = np.where(np.isnan(el_p95), no_p95, el_p95)
-                        elev_dir = elev_arr <= thr
-                        mask_elev_works = any_damage & (elev_dir | mask_wfpb)
+                        mask_elev_works = any_damage & (elev_arr <= thr)
                     
                     per_scen_stats[slr_key] = {
                         'label':     slr_label,
@@ -2038,10 +2158,9 @@ def main():
                         "The **WFP Basement chart** shows, among buildings that experience any "
                         "damage, the share for which wet-floodproofing the basement brings P95 "
                         "damage to ≤ $1k. The **Elevation chart** shows the share for which "
-                        "elevation brings P95 damage to ≤ $1k. Because elevating the first floor "
-                        "above the flood is at least as effective as wet-floodproofing the basement, "
-                        "the Elevation count also includes every building where WFP Basement works — "
-                        "so the Elevation count is always ≥ the WFP Basement count."
+                        "elevation alone brings P95 damage to ≤ $1k — the direct, strict rule, "
+                        "which matches the Map tab's least-invasive classifier "
+                        "(No Damage → WFP Basement → Elevation → Residual)."
                     )
                 
     
@@ -2096,10 +2215,36 @@ def main():
                 if dfe_filter and 'Floodplain_Status' in df_map.columns:
                     df_map = df_map[df_map['Floodplain_Status'].isin(dfe_filter)]
                 
+                # ----------------------------------------------------------
+                # "Hide $0-damage buildings" — pick the right damage metric
+                # ----------------------------------------------------------
+                # The hide filter must look at the SAME statistic the active
+                # map view colors by, otherwise we hide buildings the user
+                # would expect to see:
+                #   * Damage Heatmap        → P50 (what the heatmap colors)
+                #   * Damage Bins           → P95 (the bins are upper-tail)
+                #   * Adaptation Effective. → P95 (categories are P95-based)
+                # In particular, for the bins/effectiveness views, hiding by
+                # P50 silently drops every building with P50 = 0 but
+                # P95 > $1k — the very buildings that drive tail-risk
+                # planning. Many Shinnecock buildings fall in that bracket.
+                if map_view == "Damage Heatmap":
+                    zero_filter_col = 'No mitigation_P50' if 'No mitigation_P50' in df_map.columns else None
+                else:
+                    # P95 view — fall back to P50 only if P95 isn't loaded
+                    zero_filter_col = (
+                        'No mitigation_P95' if 'No mitigation_P95' in df_map.columns
+                        else 'No mitigation_P50' if 'No mitigation_P50' in df_map.columns
+                        else None
+                    )
+                
+                # The downstream colorbar/hover code still keys off P50
+                # (it expects the heatmap's coloring metric), so keep
+                # baseline_col aligned with the heatmap convention.
                 baseline_col = 'No mitigation_P50' if 'No mitigation_P50' in df_map.columns else None
                 
-                if baseline_col and not show_zero_damage:
-                    df_map = df_map[df_map[baseline_col] > 0]
+                if zero_filter_col and not show_zero_damage:
+                    df_map = df_map[df_map[zero_filter_col] > 0]
                 
                 if len(df_map) == 0:
                     st.warning("No buildings match the current filters.")
@@ -2889,17 +3034,38 @@ def main():
                 actions_present_cs = [a for a in action_order_cs
                                       if a in df_year_agg['Action'].unique()]
                 
-                # Pivots indexed by (Action, SLR)
+                # Pivots indexed by (Action, SLR). We pull P05/P25/P50/P75/P95
+                # so the box edges are taken straight from the workbook's
+                # stored quartiles (rather than interpolated between P05/P50/P95).
                 piv_p05 = df_year_agg.pivot_table(index='Action', columns='SLR',
                                                   values='Total_CumEAD_P05')
+                piv_p25 = (df_year_agg.pivot_table(index='Action', columns='SLR',
+                                                   values='Total_CumEAD_P25')
+                           if 'Total_CumEAD_P25' in df_year_agg.columns else None)
                 piv_p50 = df_year_agg.pivot_table(index='Action', columns='SLR',
                                                   values='Total_CumEAD_P50')
+                piv_p75 = (df_year_agg.pivot_table(index='Action', columns='SLR',
+                                                   values='Total_CumEAD_P75')
+                           if 'Total_CumEAD_P75' in df_year_agg.columns else None)
                 piv_p95 = df_year_agg.pivot_table(index='Action', columns='SLR',
                                                   values='Total_CumEAD_P95')
+
+                # 5-tuple (P05, P25, P50, P75, P95) when stored quartiles are
+                # available, otherwise fall back to the legacy 3-tuple and let
+                # build_box_whisker_panel interpolate Q1/Q3.
+                _have_quartiles = piv_p25 is not None and piv_p75 is not None
                 
                 def _agg_stats(action, slr_key):
                     if (action not in piv_p50.index) or (slr_key not in piv_p50.columns):
                         return None
+                    if _have_quartiles:
+                        return (
+                            float(piv_p05.loc[action, slr_key]),
+                            float(piv_p25.loc[action, slr_key]),
+                            float(piv_p50.loc[action, slr_key]),
+                            float(piv_p75.loc[action, slr_key]),
+                            float(piv_p95.loc[action, slr_key]),
+                        )
                     return (
                         float(piv_p05.loc[action, slr_key]),
                         float(piv_p50.loc[action, slr_key]),
@@ -2911,6 +3077,18 @@ def main():
                         return None
                     if (action not in piv_p50.index) or (slr_key not in piv_p50.columns):
                         return None
+                    # Reduction = baseline_PX − strategy_PX, computed at each
+                    # percentile rank. With real P25/P75 we can give a true
+                    # 5-number summary of the reduction; otherwise we fall
+                    # back to a 3-number summary at P05/P50/P95.
+                    if _have_quartiles:
+                        return (
+                            float(piv_p05.loc['No mitigation', slr_key]) - float(piv_p05.loc[action, slr_key]),
+                            float(piv_p25.loc['No mitigation', slr_key]) - float(piv_p25.loc[action, slr_key]),
+                            float(piv_p50.loc['No mitigation', slr_key]) - float(piv_p50.loc[action, slr_key]),
+                            float(piv_p75.loc['No mitigation', slr_key]) - float(piv_p75.loc[action, slr_key]),
+                            float(piv_p95.loc['No mitigation', slr_key]) - float(piv_p95.loc[action, slr_key]),
+                        )
                     return (
                         float(piv_p05.loc['No mitigation', slr_key]) - float(piv_p05.loc[action, slr_key]),
                         float(piv_p50.loc['No mitigation', slr_key]) - float(piv_p50.loc[action, slr_key]),
@@ -2955,9 +3133,9 @@ def main():
                     "Each box summarizes the distribution of the **community-total** cumulative "
                     "damage across Monte Carlo realizations. Box edges show the 25th and 75th "
                     "percentiles, the white center line is the median (P50), and whiskers extend "
-                    "to the 5th and 95th percentiles. P05 / P50 / P95 are taken directly from the "
-                    "aggregated Monte Carlo results; the 25th and 75th percentiles are estimated "
-                    "by linear interpolation in the CDF. The reduction panel is computed "
+                    "to the 5th and 95th percentiles. All five percentiles are taken directly "
+                    "from the aggregated Monte Carlo results stored in the workbook — no "
+                    "interpolation between bounds is performed. The reduction panel is computed "
                     "percentile-by-percentile against the same-scenario No-Mitigation baseline."
                 )
             
@@ -3061,19 +3239,48 @@ def main():
             
             st.subheader("Damage Trajectory Over Time")
             
+            # Include every adaptation strategy that's present in the data
+            # (matching the Trends tab). The previous version omitted WFP 1st
+            # despite it being available in the workbook, which biased the
+            # visual story by hiding the first-floor wet-floodproof curve.
+            traj_action_order = ['No mitigation', 'Raise Utilities',
+                                 'WFP B', 'WFP 1st', 'Elevate']
+            traj_action_labels = {
+                'No mitigation':   'No Mitigation',
+                'Raise Utilities': 'Raise Utilities',
+                'WFP B':           'WFP Basement',
+                'WFP 1st':         'WFP 1st Floor',
+                'Elevate':         'Elevate',
+            }
+            traj_color_map = {
+                'No Mitigation':   '#ef4444',   # red
+                'Raise Utilities': '#f97316',   # orange
+                'WFP Basement':    '#eab308',   # yellow
+                'WFP 1st Floor':   '#3b82f6',   # blue
+                'Elevate':         '#22c55e',   # green
+            }
+            
             df_timeline = df_agg[
-                (df_agg['SLR'] == scenario) & 
-                (df_agg['Action'].isin(['No mitigation', 'Raise Utilities', 'WFP B', 'Elevate']))
-            ]
+                (df_agg['SLR'] == scenario) &
+                (df_agg['Action'].isin(traj_action_order))
+            ].copy()
+            # Apply the consistent action labels so the legend reads cleanly
+            df_timeline['Strategy'] = df_timeline['Action'].map(traj_action_labels)
+            traj_present = [traj_action_labels[a] for a in traj_action_order
+                            if a in df_timeline['Action'].unique()]
             
             if not df_timeline.empty:
-                fig_line = px.line(df_timeline, x='TargetYear', y='Total_CumEAD_P50', color='Action',
-                    markers=True, color_discrete_map={'No mitigation': '#ef4444', 'Raise Utilities': '#f97316',
-                        'WFP B': '#eab308', 'Elevate': '#22c55e'},
-                    title=f"Cumulative Damage Projection — {occupancy_label} ({scenario} SLR Scenario)")
+                fig_line = px.line(
+                    df_timeline, x='TargetYear', y='Total_CumEAD_P50',
+                    color='Strategy',
+                    category_orders={'Strategy': traj_present},
+                    markers=True, color_discrete_map=traj_color_map,
+                    title=f"Cumulative Damage Projection — {occupancy_label} ({scenario} SLR Scenario)",
+                )
                 _l_max = df_timeline['Total_CumEAD_P50'].max()
                 l_ticks, l_labels = smart_money_ticks(_l_max, target_n=6)
-                fig_line.update_layout(yaxis_title="Cumulative Damage", xaxis_title="Year", height=400)
+                fig_line.update_layout(yaxis_title="Cumulative Damage",
+                                       xaxis_title="Year", height=400)
                 fig_line.update_yaxes(tickmode='array', tickvals=l_ticks, ticktext=l_labels)
                 st.plotly_chart(fig_line, use_container_width=True)
             
@@ -3481,27 +3688,58 @@ def main():
                             return float('nan')
                     
                     def _benefit_stats(action, slr_key):
-                        """Return (p05_benefit, p50_benefit, p95_benefit) for a
-                        retrofit strategy, clamped so the median is always
-                        between the 5th and 95th bounds. Benefit is the
-                        avoided damage relative to No Mitigation under the same
-                        SLR scenario, computed percentile-by-percentile. Returns
-                        None for the No-Mitigation row (no sensible self-benefit)."""
+                        """Return a 5-tuple (P05, P25, P50, P75, P95) of
+                        avoided-damage benefit for a retrofit strategy,
+                        clamped so the median is always between the bounds.
+
+                        Benefit is the avoided damage relative to No
+                        Mitigation under the same SLR scenario, computed
+                        percentile-by-percentile. Returns ``None`` for the
+                        No-Mitigation row (no sensible self-benefit).
+
+                        We pull P25 and P75 straight from the workbook when
+                        available (the ALL format stores them), so the box
+                        edges of the benefit chart are real percentile
+                        differences rather than CDF-linear approximations
+                        between P05 and P95.
+                        """
                         if action == 'No mitigation':
                             return None
+                        # Pull every percentile we have. P25/P75 will be NaN
+                        # for older workbooks that don't store them; in that
+                        # case we fall back to a 3-tuple.
                         b05 = _pct('No mitigation', slr_key, 'CumEAD_P05')
+                        b25 = _pct('No mitigation', slr_key, 'CumEAD_P25')
                         b50 = _pct('No mitigation', slr_key, 'CumEAD_P50')
+                        b75 = _pct('No mitigation', slr_key, 'CumEAD_P75')
                         b95 = _pct('No mitigation', slr_key, 'CumEAD_P95')
                         s05 = _pct(action, slr_key, 'CumEAD_P05')
+                        s25 = _pct(action, slr_key, 'CumEAD_P25')
                         s50 = _pct(action, slr_key, 'CumEAD_P50')
+                        s75 = _pct(action, slr_key, 'CumEAD_P75')
                         s95 = _pct(action, slr_key, 'CumEAD_P95')
                         if any(pd.isna(v) for v in (b05, b50, b95, s05, s50, s95)):
                             return None
                         raw_ben05 = b05 - s05
                         raw_ben50 = b50 - s50
                         raw_ben95 = b95 - s95
-                        # Clamp so median is between the two bounds (same rule
-                        # the table uses — keeps the chart consistent with it).
+                        have_quartiles = not any(
+                            pd.isna(v) for v in (b25, b75, s25, s75)
+                        )
+                        if have_quartiles:
+                            raw_ben25 = b25 - s25
+                            raw_ben75 = b75 - s75
+                            # Clamp the lower whisker, Q1, Q3, and upper
+                            # whisker so the box and whisker geometry is
+                            # monotone — even if rank-correlation between
+                            # baseline and strategy realizations briefly
+                            # inverts, the plotted geometry stays sensible.
+                            vals = sorted([raw_ben05, raw_ben25, raw_ben50,
+                                           raw_ben75, raw_ben95])
+                            lo, q1, _, q3, hi = vals
+                            return (lo, q1, raw_ben50, q3, hi)
+                        # Fallback: 3-tuple (whisker, median, whisker), with
+                        # build_box_whisker_panel interpolating Q1/Q3.
                         lo = min(raw_ben05, raw_ben50, raw_ben95)
                         hi = max(raw_ben05, raw_ben50, raw_ben95)
                         return (lo, raw_ben50, hi)
