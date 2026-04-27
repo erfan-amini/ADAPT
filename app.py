@@ -1672,7 +1672,7 @@ def main():
                 )
                 
                 # ----- Strategy ordering & labels -----
-                action_order  = ['No mitigation', 'Raise Utilities', 'WFP B', 'WFP 1st', 'Elevate']
+                action_order  = ['No mitigation', 'Raise Utilities', 'WFP B', 'Elevate', 'WFP 1st']
                 action_labels_plain = {
                     'No mitigation':   'No Mitigation',
                     'Raise Utilities': 'Raise Utilities',
@@ -3010,7 +3010,7 @@ def main():
             if df_year_agg.empty:
                 st.info(f"No aggregated data for year {target_year}.")
             else:
-                action_order_cs = ['No mitigation', 'Raise Utilities', 'WFP B', 'WFP 1st', 'Elevate']
+                action_order_cs = ['No mitigation', 'Raise Utilities', 'WFP B', 'Elevate', 'WFP 1st']
                 action_labels_cs = {
                     'No mitigation':   'No Mitigation',
                     'Raise Utilities': 'Raise Utilities',
@@ -3136,11 +3136,24 @@ def main():
                 st.markdown("### 🔴 Under DFE (Below BFE+2)")
                 
                 if 'InFP_CumEAD_P50' in df_current.columns:
+                    # Canonical action order: severity-of-intervention, with
+                    # Elevate placed BEFORE WFP 1st Floor (per workshop
+                    # convention; both the bar chart x-axis and the table
+                    # rows below follow it).
+                    dfe_action_order = ['No mitigation', 'Raise Utilities',
+                                        'WFP B', 'Elevate', 'WFP 1st']
+                    df_current_sorted = df_current.copy()
+                    df_current_sorted['_ord'] = df_current_sorted['Action'].apply(
+                        lambda a: dfe_action_order.index(a)
+                                  if a in dfe_action_order else 999
+                    )
+                    df_current_sorted = df_current_sorted.sort_values('_ord')
+                    
                     under_dfe_data = []
                     baseline_infp = df_current[df_current['Action'] == 'No mitigation']['InFP_CumEAD_P50'].values
                     baseline_infp = baseline_infp[0] if len(baseline_infp) > 0 else 0
                     
-                    for _, row in df_current.iterrows():
+                    for _, row in df_current_sorted.iterrows():
                         action = row['Action']
                         val = row['InFP_CumEAD_P50']
                         savings = baseline_infp - val
@@ -3157,6 +3170,7 @@ def main():
                     fig_under = px.bar(df_under, x='Action', y='Cumulative Damage ($)', color='Action',
                         color_discrete_map={'No mitigation': '#ef4444', 'Raise Utilities': '#f97316',
                             'WFP B': '#eab308', 'Elevate': '#22c55e', 'WFP 1st': '#3b82f6'},
+                        category_orders={'Action': dfe_action_order},
                         title="Under DFE — All Strategies")
                     # Smart $k/$M/$B y-axis ticks
                     _u_max = df_under['Cumulative Damage ($)'].max()
@@ -3180,11 +3194,22 @@ def main():
                 st.markdown("### 🟢 Above DFE (Above BFE+2)")
                 
                 if 'OutFP_CumEAD_P50' in df_current.columns:
+                    # Same canonical order; Elevate is omitted from the
+                    # Above-DFE chart (already at/above BFE+2 by definition).
+                    dfe_action_order_above = ['No mitigation', 'Raise Utilities',
+                                              'WFP B', 'WFP 1st']
+                    df_current_sorted_a = df_current.copy()
+                    df_current_sorted_a['_ord'] = df_current_sorted_a['Action'].apply(
+                        lambda a: dfe_action_order_above.index(a)
+                                  if a in dfe_action_order_above else 999
+                    )
+                    df_current_sorted_a = df_current_sorted_a.sort_values('_ord')
+                    
                     above_dfe_data = []
                     baseline_outfp = df_current[df_current['Action'] == 'No mitigation']['OutFP_CumEAD_P50'].values
                     baseline_outfp = baseline_outfp[0] if len(baseline_outfp) > 0 else 0
                     
-                    for _, row in df_current.iterrows():
+                    for _, row in df_current_sorted_a.iterrows():
                         action = row['Action']
                         if action == 'Elevate':
                             continue
@@ -3204,6 +3229,7 @@ def main():
                         fig_above = px.bar(df_above, x='Action', y='Cumulative Damage ($)', color='Action',
                             color_discrete_map={'No mitigation': '#ef4444', 'Raise Utilities': '#f97316',
                                 'WFP B': '#eab308', 'WFP 1st': '#3b82f6'},
+                            category_orders={'Action': dfe_action_order_above},
                             title="Above DFE — Strategies (excl. Elevate)")
                         _a_max = df_above['Cumulative Damage ($)'].max()
                         a_ticks, a_labels = smart_money_ticks(_a_max, target_n=5)
@@ -3231,7 +3257,7 @@ def main():
             # despite it being available in the workbook, which biased the
             # visual story by hiding the first-floor wet-floodproof curve.
             traj_action_order = ['No mitigation', 'Raise Utilities',
-                                 'WFP B', 'WFP 1st', 'Elevate']
+                                 'WFP B', 'Elevate', 'WFP 1st']
             traj_action_labels = {
                 'No mitigation':   'No Mitigation',
                 'Raise Utilities': 'Raise Utilities',
@@ -3873,7 +3899,7 @@ def main():
                 
                 if not df_building_year.empty:
                     # Consistent ordering: baseline first, then strategies from least → most invasive
-                    bd_action_order = ['No mitigation', 'Raise Utilities', 'WFP B', 'WFP 1st', 'Elevate']
+                    bd_action_order = ['No mitigation', 'Raise Utilities', 'WFP B', 'Elevate', 'WFP 1st']
                     bd_action_labels = {
                         'No mitigation':   'No Mitigation',
                         'Raise Utilities': 'Raise Utilities',
@@ -4201,7 +4227,7 @@ def main():
             )
 
             # Stable action ordering + display labels, matching the other tabs
-            trend_action_order = ['No mitigation', 'Raise Utilities', 'WFP B', 'WFP 1st', 'Elevate']
+            trend_action_order = ['No mitigation', 'Raise Utilities', 'WFP B', 'Elevate', 'WFP 1st']
             trend_action_labels = {
                 'No mitigation':   'No Mitigation',
                 'Raise Utilities': 'Raise Utilities',
