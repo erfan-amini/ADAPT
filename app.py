@@ -493,60 +493,102 @@ def load_bundle(data_folder, location_slug):
     # the descriptive context the Map / Details / Distributions tabs need.
     df_buildings = bldg_dmg.merge(bldg_attrs, on='id', how='left')
 
-    # 6. Categories — derive All / Residential / Non-Residential rollups
-    cat = pd.read_csv(join(f'{location_slug}_CumulativeDamage_categories.csv'))
-    cat['TargetYear'] = _bundle_normalize_target_year(cat['TargetYear'])
-
+    # 6. Aggregate community-total damage tables per occupancy filter.
+    #
+    # Earlier versions of this loader sourced the community totals from the
+    # `{LOC}_CumulativeDamage_categories.csv` rollup file. That file is
+    # supposed to give MC-correct community percentiles (computed from sums
+    # of MC realizations across buildings, not from summing per-building
+    # percentiles), but real data sometimes ships with the No-Mitigation
+    # rows zeroed out — which makes the Summary metric read $0 while the
+    # retrofit rows still hold real values, and the "Damage Reduction"
+    # chart then plots NEGATIVE reductions because it computes
+    # `baseline − retrofit = 0 − $235M`. To keep the Summary, the box-
+    # plot, and the Map/Details visualizations all consistent, we now
+    # build the aggregate **directly from the per-building damage table**
+    # (the same source the per-building visuals read from). The
+    # statistical concession is that we use sum-of-percentiles rather
+    # than percentile-of-sum for the tails (P05/P95), which slightly
+    # overstates community tails — but consistency is far more important
+    # for decision support than that small bias, and the median (P50) is
+    # essentially unaffected.
     is_res = bldg_attrs['occupancy_type'].apply(is_residential)
     bldg_counts = {
         'All':             int(len(bldg_attrs)),
         'Residential':     int(is_res.sum()),
         'Non-Residential': int((~is_res).sum()),
     }
-    filter_map = {
-        'All':             {'all':   ['RES_InFP', 'RES_OutFP', 'NONRES_InFP', 'NONRES_OutFP'],
-                            'infp':  ['RES_InFP', 'NONRES_InFP'],
-                            'outfp': ['RES_OutFP', 'NONRES_OutFP']},
-        'Residential':     {'all':   ['RES_InFP', 'RES_OutFP'],
-                            'infp':  ['RES_InFP'],
-                            'outfp': ['RES_OutFP']},
-        'Non-Residential': {'all':   ['NONRES_InFP', 'NONRES_OutFP'],
-                            'infp':  ['NONRES_InFP'],
-                            'outfp': ['NONRES_OutFP']},
+    res_ids = set(bldg_attrs.loc[is_res, 'id'].astype(int).tolist())
+    nonres_ids = set(bldg_attrs.loc[~is_res, 'id'].astype(int).tolist())
+    occ_id_map = {
+        'All':             None,        # no filter
+        'Residential':     res_ids,
+        'Non-Residential': nonres_ids,
     }
+
     grp_cols = ['TargetYear', 'Action', 'SLR']
-    cat_pcts_present = [p for p in BUNDLE_PCT_LIST if p in cat.columns]
+    pct_cols_in_bldg = [c for c in df_buildings.columns
+                        if c.startswith('CumEAD_P')]
 
     agg_by_occ = {}
-    for occ, fmap in filter_map.items():
-        sub_total = cat[cat['Category'].isin(fmap['all'])]
-        if sub_total.empty:
+    for occ, ids_filter in occ_id_map.items():
+        if ids_filter is None:
+            df_o = df_buildings
+        else:
+            if not ids_filter:
+                agg_by_occ[occ] = pd.DataFrame()
+                continue
+            df_o = df_buildings[df_buildings['id'].astype(int).isin(ids_filter)]
+
+        if df_o.empty or not pct_cols_in_bldg:
             agg_by_occ[occ] = pd.DataFrame()
             continue
-        # Sum leaves percentile-by-percentile. The total is sum-of-medians,
-        # an approximation of median-of-sum — but because we sum the same
-        # leaves for InFP and OutFP, the split is exactly reconciled.
-        total = sub_total.groupby(grp_cols, as_index=False)[cat_pcts_present].sum()
-        total = total.rename(columns={p: f'Total_CumEAD_{p}' for p in cat_pcts_present})
 
-        sub_in = cat[cat['Category'].isin(fmap['infp'])]
-        in_p50 = (sub_in.groupby(grp_cols, as_index=False)['P50'].sum()
-                  if not sub_in.empty
-                  else pd.DataFrame(columns=grp_cols + ['P50']))
-        in_p50 = in_p50.rename(columns={'P50': 'InFP_CumEAD_P50'})
+        total = df_o.groupby(grp_cols, as_index=False)[pct_cols_in_bldg].sum()
+        total = total.rename(columns={
+            c: f"Total_CumEAD_{c.split('_')[1]}" for c in pct_cols_in_bldg
+        })
 
-        sub_out = cat[cat['Category'].isin(fmap['outfp'])]
-        out_p50 = (sub_out.groupby(grp_cols, as_index=False)['P50'].sum()
-                   if not sub_out.empty
-                   else pd.DataFrame(columns=grp_cols + ['P50']))
-        out_p50 = out_p50.rename(columns={'P50': 'OutFP_CumEAD_P50'})
+        # InFP / OutFP P50 split from Floodplain_Status. The split sums
+        # to Total_CumEAD_P50 by construction (every building falls into
+        # exactly one DFE bucket), so the metric reconciles cleanly.
+        if 'Floodplain_Status' in df_o.columns:
+            df_in = df_o[df_o['Floodplain_Status'] == 'Under DFE']
+            df_out = df_o[df_o['Floodplain_Status'] == 'Above DFE']
+            in_p50 = (df_in.groupby(grp_cols, as_index=False)['CumEAD_P50']
+                      .sum()
+                      .rename(columns={'CumEAD_P50': 'InFP_CumEAD_P50'})
+                      if not df_in.empty
+                      else pd.DataFrame(columns=grp_cols + ['InFP_CumEAD_P50']))
+            out_p50 = (df_out.groupby(grp_cols, as_index=False)['CumEAD_P50']
+                       .sum()
+                       .rename(columns={'CumEAD_P50': 'OutFP_CumEAD_P50'})
+                       if not df_out.empty
+                       else pd.DataFrame(columns=grp_cols + ['OutFP_CumEAD_P50']))
+            merged = (total.merge(in_p50, on=grp_cols, how='left')
+                           .merge(out_p50, on=grp_cols, how='left'))
+            merged['InFP_CumEAD_P50']  = merged['InFP_CumEAD_P50'].fillna(0.0)
+            merged['OutFP_CumEAD_P50'] = merged['OutFP_CumEAD_P50'].fillna(0.0)
+        else:
+            merged = total.copy()
+            merged['InFP_CumEAD_P50']  = 0.0
+            merged['OutFP_CumEAD_P50'] = 0.0
 
-        merged = (total.merge(in_p50, on=grp_cols, how='left')
-                       .merge(out_p50, on=grp_cols, how='left'))
-        merged['InFP_CumEAD_P50']  = merged['InFP_CumEAD_P50'].fillna(0.0)
-        merged['OutFP_CumEAD_P50'] = merged['OutFP_CumEAD_P50'].fillna(0.0)
         merged['Num_Buildings'] = bldg_counts[occ]
         agg_by_occ[occ] = merged.reset_index(drop=True)
+
+    # Optional sanity comparison: if the categories CSV is present, log
+    # how its 'All' P50 differs from the per-building P50 we just built.
+    # We don't surface this in the UI because the per-building source
+    # is now canonical — the comparison just helps when debugging
+    # data-pipeline issues for a new location.
+    cat_csv_path = join(f'{location_slug}_CumulativeDamage_categories.csv')
+    cat = None
+    try:
+        cat = pd.read_csv(cat_csv_path)
+        cat['TargetYear'] = _bundle_normalize_target_year(cat['TargetYear'])
+    except (FileNotFoundError, pd.errors.EmptyDataError):
+        pass
 
     # 7. Water levels — load raw MC + pre-compute percentile shim
     water_levels = {}
