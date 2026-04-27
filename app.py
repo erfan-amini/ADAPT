@@ -332,539 +332,317 @@ def load_csv_file(filepath):
 
 
 # ----------------------------------------------------------------------------
-# New-format (MC-realization) Excel loader
+# CSV-bundle loader (current ADAPT data format)
 # ----------------------------------------------------------------------------
-# The "new" workbook layout stores every Monte Carlo realization as its own
-# column (MC_0001 … MC_nnnn) on three data sheets:
-#   * Dmg_agg              — annual damage per (Year, Action, SLR)
-#   * CumEAD_Categories    — cumulative damage per (Category, TargetYear,
-#                            Action, SLR) for Category ∈ {ALL, RES, NONRES,
-#                            RES_InFP, RES_OutFP, NONRES_InFP, NONRES_OutFP}
-#   * bldg_CumEAD_MC       — cumulative damage per (BuildingID, TargetYear,
-#                            Action, SLR)
-# Plus two smaller descriptor sheets (Metadata, Buildings) and two water-level
-# sheets (WL_P50, WL_P90). Percentiles (P05, P10, P50, P90, P95) are NOT
-# pre-computed — they're derived here by taking np.percentile across the MC
-# columns for each row. The per-building and per-category results are then
-# packaged into the same DataFrame schema the rest of the app already uses.
+# The upstream pipeline ships a per-location bundle of seven files:
+#
+#   {LOCATION}_metadata.csv                            — key/value metadata
+#   {LOCATION}_bldg_lookup.csv                         — analysis-ready bldg attrs
+#   {LOCATION}_bldg_CumulativeDamage.csv               — bldg × (year, action, slr) × pcts
+#   {LOCATION}_CumulativeDamage_categories.csv         — 4 leaf categories × ... × pcts
+#   {LOCATION}_skipped_buildings.csv                   — provenance log
+#   DDD___{LOCATION}___NSI.xlsx                        — full NSI descriptors
+#   DDD___{LOCATION}_MC_annual_max_waterlevels_P50.csv — Year × MC_0001..MC_1000
+#   DDD___{LOCATION}_MC_annual_max_waterlevels_P90.csv — same for high-end SLR
+#
+# Two structural points worth flagging up front:
+#   * `TargetYear` ships as a string column with values 'Potential', '2040',
+#     '2055', '2100'. We map 'Potential'→2025 and cast to int here so the
+#     rest of the app can keep using numeric comparisons. The original label
+#     is preserved in `target_year_labels` for display.
+#   * Categories ship only the four leaves (RES_InFP, RES_OutFP,
+#     NONRES_InFP, NONRES_OutFP). We sum them percentile-by-percentile to
+#     build All / Residential / Non-Residential rollups. This makes the
+#     InFP+OutFP split sum to the displayed total *exactly* — eliminating
+#     the ~5% reconciliation gap the old format had between sum-of-medians
+#     and median-of-sum.
 
-# Canonical list of percentiles we derive from MC realizations
-# Match the percentile set kept by the ALL loader so both code paths produce
-# DataFrames with the same column schema. P25/P75 are needed for true-quartile
-# box edges in the Summary and Details boxplots.
-_MC_PERCENTILES = [5, 10, 25, 50, 75, 90, 95]
+# Percentile manifest the bundle ships (23 columns: dense at both tails
+# plus quartiles).
+BUNDLE_PCT_LIST = ['P01','P02','P03','P04','P05','P06','P07','P08','P09','P10',
+                   'P25','P50','P75',
+                   'P90','P91','P92','P93','P94','P95','P96','P97','P98','P99']
 
-# Map old building-attribute column names → new names on the Buildings sheet
-_NEW_BLDG_COL_MAP = {
-    'BuildingID':           'id',
-    'OccupancyType':        'occupancy_type',
-    'NumberOfStories':      'number_of_stories',
-    'FoundationType':       'foundation_type',
-    'FoundationHeight_ft':  'foundation_height',
-    'GroundElevation_ft':   'ground_elevation',
-    'StructureValue':       'structure_value',
-    'ContentValue':         'content_value',
-    # FFE_ft and Floodplain_Status already match the old schema
-}
+# Subset kept on per-building damage rows. Mirrors what the existing tabs
+# read (P05/P10/P25/P50/P75/P90/P95) plus deeper tails (P01/P99) for any
+# future tail-risk panel.
+PER_BLDG_PCT_KEEP = ['P01','P05','P10','P25','P50','P75','P90','P95','P99']
 
 
-def _percentile_columns_from_mc(df_mc, mc_cols, prefix="CumEAD"):
-    """Compute the percentile set in ``_MC_PERCENTILES`` (P05/P10/P25/P50/
-    P75/P90/P95) across MC columns for every row. Returns a new DataFrame
-    that replaces the MC columns with ``<prefix>_Pxx`` (zero-padded). Both
-    quartile (P25/P75) and decile-tail (P05/P10/P90/P95) percentiles are
-    included so downstream box-plots can use real stored quartiles instead
-    of approximating them by linear-CDF interpolation."""
-    arr = df_mc[mc_cols].to_numpy(dtype=float, na_value=np.nan)
-    # np.nanpercentile handles the rare case where a row has all-NaN
-    pct_arr = np.nanpercentile(arr, _MC_PERCENTILES, axis=1)
-    # pct_arr has shape (len(percentiles), n_rows)
-    out = df_mc.drop(columns=mc_cols).copy()
-    for i, p in enumerate(_MC_PERCENTILES):
-        out[f'{prefix}_P{p:02d}'] = pct_arr[i]
+def _bundle_read_metadata(path):
+    """Parse `{LOC}_metadata.csv` (Key,Value pairs) into a dict, splitting
+    list-valued fields (TARGET_YEARS, ACTION_NAMES, etc.) into Python lists."""
+    raw = pd.read_csv(path)
+    out = {}
+    for _, row in raw.iterrows():
+        k = str(row['Key']).strip()
+        v = str(row['Value']).strip().strip('"')
+        out[k] = v
+    for list_key in ('TARGET_YEARS', 'TARGET_YEAR_LABELS', 'ACTIONS',
+                     'ACTION_NAMES', 'SCENARIOS', 'SCENARIO_LABELS',
+                     'PERCENTILES'):
+        if list_key in out:
+            out[list_key] = [s.strip() for s in out[list_key].split(',')]
     return out
 
 
-# Prefer the calamine engine for the new-format workbooks — for MC sheets
-# with ~8,000 rows x ~1,000 columns it's ~10x faster than the default
-# openpyxl reader and turns an app-startup that would otherwise take a minute
-# into a few seconds. Falls back to openpyxl if calamine isn't installed.
-try:
-    import python_calamine  # noqa: F401
-    _XLSX_ENGINE = 'calamine'
-except Exception:
-    _XLSX_ENGINE = None   # let pandas pick its default (openpyxl)
+def _bundle_normalize_target_year(series):
+    """'Potential'→2025 + cast to int. Bundle ships TargetYear as mixed
+    strings; the rest of the app uses numeric comparisons."""
+    return (series.astype(str)
+                  .replace({'Potential': '2025'})
+                  .astype(int))
 
 
-def _read_excel_fast(filepath, sheet_name):
-    """pd.read_excel using the fastest engine available on this machine."""
-    kwargs = {'sheet_name': sheet_name}
-    if _XLSX_ENGINE:
-        kwargs['engine'] = _XLSX_ENGINE
-    return pd.read_excel(filepath, **kwargs)
+def _bundle_build_attrs_table(lookup_df, nsi_df):
+    """Combine bldg_lookup (analysis-ready) with NSI (descriptive).
 
-
-# ----------------------------------------------------------------------------
-# ALL-format (pre-aggregated percentiles) Excel loader
-# ----------------------------------------------------------------------------
-# The "_Results_ALL.xlsx" workbook is the lightweight successor to the
-# "_Results_new.xlsx" Monte-Carlo workbook. The user has already collapsed the
-# 1,000 MC realizations into 99 percentile columns (P01 … P99) directly in
-# Excel, so the app no longer needs to perform that aggregation at load time.
-# This makes the file ~10x smaller and the loader ~50x faster (no
-# np.nanpercentile across 8,000 × 1,000 cells).
-#
-# Sheets in the ALL format:
-#   * Metadata             — key/value pairs
-#   * Buildings            — per-building static attributes
-#   * WL_P50, WL_P90       — water-level realizations: 76 years × 99 percentiles
-#   * Dmg_agg              — annual damage per (Year, Action, SLR) × 99 pct
-#   * CumEAD_Categories    — cumulative damage per (Category, TargetYear,
-#                            Action, SLR) × 99 pct
-#   * bldg_CumEAD          — cumulative damage per (BuildingID, TargetYear,
-#                            Action, SLR) × 99 pct
-#
-# Of the 99 percentiles only P05, P10, P50, P90, P95 are consumed downstream,
-# so we drop the rest at load time to keep memory tidy.
-
-# Percentile column names we extract from the ALL workbook. We keep the full
-# set the rest of the app needs:
-#   P05/P10/P50/P90/P95 — whiskers and shaded bands on box/CDF/timeline plots
-#   P25/P75            — exact quartiles for box edges (used by community-level
-#                        boxplots in the Summary tab and the per-building
-#                        benefit boxplot in the Details tab). Without these,
-#                        the app would fall back to linear-CDF interpolation
-#                        between P05/P50/P95, which is correct only under a
-#                        symmetric distribution and biases the Q1/Q3 edges by
-#                        a few percent for the skewed tails we see in flood
-#                        damages.
-_ALL_PCT_KEEP = ['P05', 'P10', 'P25', 'P50', 'P75', 'P90', 'P95']
-
-
-@st.cache_data
-def load_xlsx_file_all_format(filepath):
-    """Load an 'ALL format' result workbook (pre-aggregated percentiles) and
-    return the same dict-of-DataFrames the rest of the app already consumes:
-    ``{'buildings': df, 'agg_by_occ': {occ: df}, 'bldg_attrs': df}``.
-
-    Compared with :func:`load_xlsx_file_new_format`, this loader does NO
-    Monte-Carlo aggregation — it just reads the pre-computed P05/P10/P50/P90/P95
-    columns straight out of the workbook. That's the whole point of the ALL
-    format: the heavy lifting was done once in Excel and shipped as data.
+    Lookup is the source of truth for fields that drove the damage
+    calculation (lon/lat, structure/content values, FFE, floodplain
+    status, SOID). NSI contributes building_type, number_of_stories, area,
+    foundation_type, foundation_height, year_built, address — fields the
+    lookup doesn't carry.
     """
-    # ---------------------- Buildings descriptor table ---------------------
-    bld = _read_excel_fast(filepath, 'Buildings')
-    bld = bld.rename(columns={k: v for k, v in _NEW_BLDG_COL_MAP.items()
-                              if k in bld.columns})
-    if 'Floodplain_Status' in bld.columns:
-        bld['Floodplain_Status'] = bld['Floodplain_Status'].apply(convert_floodplain_status)
-    # Attributes the rest of the app references but that aren't in this file
-    for col in ['building_type', 'area', 'year_built', 'address',
-                'longitude', 'latitude']:
-        if col not in bld.columns:
-            bld[col] = np.nan
+    nsi = nsi_df.rename(columns={'ID': 'BuildingID'}).copy()
+    descriptive_only = ['building_type', 'number_of_stories', 'area',
+                        'foundation_type', 'foundation_height',
+                        'year_built', 'address']
+    desc_cols = ['BuildingID'] + [c for c in descriptive_only if c in nsi.columns]
 
-    # -------------------- Per-building cumulative damage --------------------
-    bldg = _read_excel_fast(filepath, 'bldg_CumEAD')
-    keep_cols = ['BuildingID', 'TargetYear', 'Action', 'SLR'] + _ALL_PCT_KEEP
-    bldg = bldg[[c for c in keep_cols if c in bldg.columns]].copy()
-    # Rename Pxx → CumEAD_Pxx and BuildingID → id to match the existing schema
-    bldg = bldg.rename(columns={
-        'BuildingID': 'id',
-        **{p: f'CumEAD_{p}' for p in _ALL_PCT_KEEP},
-    })
-    attr_cols = [c for c in bld.columns if c != 'NSI_row']
-    df_buildings = bldg.merge(bld[attr_cols], on='id', how='left')
+    out = lookup_df.merge(nsi[desc_cols], on='BuildingID', how='left')
 
-    # ---------------------- Aggregated CumEAD (Categories) -----------------
-    cat = _read_excel_fast(filepath, 'CumEAD_Categories')
-    cat = cat[['Category', 'TargetYear', 'Action', 'SLR'] + _ALL_PCT_KEEP].copy()
-
-    # Map each occupancy filter to:
-    #   (top_level_category, [in-FP subcats], [out-FP subcats])
-    # The top-level category gives us Total_CumEAD_Pxx directly. The subcat
-    # lists give us InFP/OutFP_CumEAD_P50 by summing per-category P50s.
-    # NB: Σmedian ≠ median(Σ) in general, but the discrepancy is small (<1%)
-    # because the underlying MC realizations share the same hazard. Importantly,
-    # this is exactly what the user has already accepted upstream — the whole
-    # reason for shipping ALL-format data is that the user wants the app to
-    # consume their pre-aggregated values without re-running the math.
-    occ_to_cat = {
-        'All':             ('ALL',    ['RES_InFP', 'NONRES_InFP'],
-                                       ['RES_OutFP', 'NONRES_OutFP']),
-        'Residential':     ('RES',    ['RES_InFP'],     ['RES_OutFP']),
-        'Non-Residential': ('NONRES', ['NONRES_InFP'],  ['NONRES_OutFP']),
+    # Lowercase rename to the schema the rest of the app already references.
+    # NB: We keep `FFE_ft`, `Floodplain_Status`, and `SOID` in their original
+    # case because the existing UI code looks them up by those exact names.
+    rename = {
+        'BuildingID':         'id',
+        'OccupancyType':      'occupancy_type',
+        'OccupancyGroup':     'occupancy_group',
+        'StructureValue':     'structure_value',
+        'ContentValue':       'content_value',
+        'GroundElevation_ft': 'ground_elevation',
+        'Longitude':          'longitude',
+        'Latitude':           'latitude',
     }
-
-    _is_res = (bld['occupancy_type'].apply(is_residential)
-               if 'occupancy_type' in bld.columns
-               else pd.Series(False, index=bld.index))
-    bldg_counts = {
-        'All':             int(len(bld)),
-        'Residential':     int(_is_res.sum()),
-        'Non-Residential': int((~_is_res).sum()),
-    }
-
-    def _split_p50_sum(categories, year, action, slr):
-        """Sum of P50 across the named categories for the given filter.
-        Returns 0.0 if no rows match (e.g. when an InFP slice is empty)."""
-        sub = cat[(cat['TargetYear'] == year) &
-                  (cat['Action'] == action) &
-                  (cat['SLR'] == slr) &
-                  (cat['Category'].isin(categories))]
-        if sub.empty:
-            return 0.0
-        return float(sub['P50'].sum())
-
-    agg_by_occ = {}
-    for occ, (top_cat, infp_cats, outfp_cats) in occ_to_cat.items():
-        top = cat[cat['Category'] == top_cat].copy()
-        if top.empty:
-            agg_by_occ[occ] = pd.DataFrame()
-            continue
-        top = top.rename(columns={p: f'Total_CumEAD_{p}' for p in _ALL_PCT_KEEP})
-        top = top.drop(columns=['Category'])
-        # ----------------------------------------------------------------
-        # DFE split — reconcile to the community total
-        # ----------------------------------------------------------------
-        # The Under-DFE / Above-DFE P50 values come from summing per-subset
-        # P50 medians (e.g. RES_InFP P50 + NONRES_InFP P50). The community
-        # total P50 comes directly from the ALL category. Because
-        #   median(A + B) ≠ median(A) + median(B)
-        # in general, the two derivations don't agree exactly. On the
-        # Shinnecock dataset the largest gap I measured was ~4.7%, small
-        # but enough that the displayed split would not sum to the
-        # displayed total. To keep the user-facing numbers self-consistent,
-        # we rescale the InFP/OutFP P50 split so that
-        #   InFP_P50 + OutFP_P50  ==  Total_P50
-        # while preserving the InFP : OutFP ratio that the underlying
-        # category medians imply.
-        infp_raw  = top.apply(
-            lambda r: _split_p50_sum(infp_cats,  r['TargetYear'], r['Action'], r['SLR']),
-            axis=1,
-        )
-        outfp_raw = top.apply(
-            lambda r: _split_p50_sum(outfp_cats, r['TargetYear'], r['Action'], r['SLR']),
-            axis=1,
-        )
-        split_sum = infp_raw + outfp_raw
-        total_p50 = top['Total_CumEAD_P50'].astype(float)
-        # Where the raw split sum is positive, scale to match the total.
-        # Where it's zero (no in-/out-FP buildings), pass through zeros.
-        scale = np.where(split_sum > 0, total_p50 / split_sum, 0.0)
-        top['InFP_CumEAD_P50']  = (infp_raw  * scale).astype(float)
-        top['OutFP_CumEAD_P50'] = (outfp_raw * scale).astype(float)
-        top['Num_Buildings'] = bldg_counts[occ]
-        agg_by_occ[occ] = top.reset_index(drop=True)
-
-    # -------------------- Water-level percentile sheets --------------------
-    # WL_P50 / WL_P90 store annual-maximum stillwater level percentiles by
-    # year (Year × P01..P99). The Water Levels tab visualizes these directly.
-    # We keep the FULL P01..P99 grid here (rather than the small subset used
-    # for damage box-plots) because the WL plots show shaded percentile
-    # bands and CDFs that benefit from the dense percentile sampling.
-    wl_data = {}
-    for slr_key, sheet_name in (('50th-percentile', 'WL_P50'),
-                                ('90th-percentile', 'WL_P90')):
-        try:
-            wl_df = _read_excel_fast(filepath, sheet_name)
-            if 'Year' in wl_df.columns:
-                wl_data[slr_key] = wl_df
-        except Exception:
-            # Sheet missing — continue silently; the Water Levels tab will
-            # show a graceful "no data" message.
-            pass
-
-    return {
-        'buildings':  df_buildings,
-        'agg_by_occ': agg_by_occ,
-        'bldg_attrs': bld,
-        'water_levels': wl_data,
-    }
+    out = out.rename(columns=rename)
+    if 'Floodplain_Status' in out.columns:
+        out['Floodplain_Status'] = out['Floodplain_Status'].apply(convert_floodplain_status)
+    return out
 
 
-@st.cache_data
-def load_xlsx_file_new_format(filepath):
-    """Load a 'new format' result workbook and return a dict of DataFrames
-    ready for the app: per-building (with percentile columns) and per-occupancy
-    aggregated (with percentile columns and DFE-split medians)."""
-    # Don't hold ExcelFile open — with calamine each sheet is read as its own
-    # pass, and it re-opens the file efficiently per call.
-    # ---------------------- Buildings descriptor table ---------------------
-    bld = _read_excel_fast(filepath, 'Buildings')
-    bld = bld.rename(columns={k: v for k, v in _NEW_BLDG_COL_MAP.items()
-                              if k in bld.columns})
-    if 'Floodplain_Status' in bld.columns:
-        bld['Floodplain_Status'] = bld['Floodplain_Status'].apply(convert_floodplain_status)
-    # Attributes missing in new format but referenced elsewhere — create
-    # NaN columns so downstream code can keep using .get(col, default)
-    for col in ['building_type', 'area', 'year_built', 'address',
-                'longitude', 'latitude']:
-        if col not in bld.columns:
-            bld[col] = np.nan
+def _bundle_wl_percentiles_from_mc(wl_mc):
+    """Compute (Year × Pxx) percentile DataFrame from a raw MC sheet.
 
-    # -------------------- Per-building cumulative damage --------------------
-    bldg_mc = _read_excel_fast(filepath, 'bldg_CumEAD_MC')
-    mc_cols_bldg = [c for c in bldg_mc.columns if c.startswith('MC_')]
-    bldg_pct = _percentile_columns_from_mc(bldg_mc, mc_cols_bldg, prefix='CumEAD')
-    bldg_pct = bldg_pct.rename(columns={'BuildingID': 'id'})
-
-    # Join attributes onto every (id, TargetYear, Action, SLR) row
-    attr_cols = [c for c in bld.columns if c != 'NSI_row']
-    df_buildings = bldg_pct.merge(bld[attr_cols], on='id', how='left')
-
-    # ---------------------- Aggregated CumEAD (Categories) -----------------
-    cat_mc = _read_excel_fast(filepath, 'CumEAD_Categories')
-    mc_cols_cat = [c for c in cat_mc.columns if c.startswith('MC_')]
-
-    # Pre-compute percentiles for each Category row (drops MC columns)
-    cat_pct = _percentile_columns_from_mc(cat_mc, mc_cols_cat, prefix='CumEAD')
-
-    # DFE-split medians ideally come from summing In/Out-FP MCs across
-    # RES+NONRES (for the "All" occupancy view), RES-only, or NONRES-only,
-    # then taking the median of the summed MC vector. That's statistically
-    # correct whereas summing per-building P50s would not be.
-    # We do that in-memory using cat_mc (still with MCs) since we're loading
-    # it once per workbook.
-    def _split_median(categories, year, action, slr):
-        """Median of the (MC-space) sum of `categories` for the given
-        (year, action, slr). Returns 0 if no rows match."""
-        sub = cat_mc[(cat_mc['TargetYear'] == year) &
-                     (cat_mc['Action'] == action) &
-                     (cat_mc['SLR'] == slr) &
-                     (cat_mc['Category'].isin(categories))]
-        if sub.empty:
-            return 0.0
-        arr = sub[mc_cols_cat].to_numpy(dtype=float, na_value=0.0).sum(axis=0)
-        return float(np.nanmedian(arr))
-
-    # Build the per-occupancy aggregated dataframes. For each occupancy
-    # filter we pick the right top-level Category to derive the total
-    # percentile columns, and assemble the InFP/OutFP medians from the
-    # corresponding split categories.
-    occ_to_cat = {
-        'All':             ('ALL',   ['RES_InFP', 'NONRES_InFP'],
-                                      ['RES_OutFP', 'NONRES_OutFP']),
-        'Residential':     ('RES',    ['RES_InFP'],     ['RES_OutFP']),
-        'Non-Residential': ('NONRES', ['NONRES_InFP'],  ['NONRES_OutFP']),
-    }
-
-    # Count the buildings in each occupancy bucket (for 'Num_Buildings')
-    _is_res = bld['occupancy_type'].apply(is_residential) if 'occupancy_type' in bld.columns else pd.Series(False, index=bld.index)
-    bldg_counts = {
-        'All':             int(len(bld)),
-        'Residential':     int(_is_res.sum()),
-        'Non-Residential': int((~_is_res).sum()),
-    }
-
-    agg_by_occ = {}
-    for occ, (top_cat, infp_cats, outfp_cats) in occ_to_cat.items():
-        top = cat_pct[cat_pct['Category'] == top_cat].copy()
-        if top.empty:
-            agg_by_occ[occ] = pd.DataFrame()
-            continue
-        # Rename CumEAD_* → Total_CumEAD_* so the rest of the app keeps working.
-        # We rename ALL percentile columns we computed (per _MC_PERCENTILES) so
-        # the schema matches the ALL-format loader output exactly — including
-        # P25/P75 used by box-plot quartile edges.
-        top = top.rename(columns={
-            f'CumEAD_P{p:02d}': f'Total_CumEAD_P{p:02d}'
-            for p in _MC_PERCENTILES
-        }).drop(columns=['Category'])
-        # DFE-split medians (MC-space sum of relevant categories, then median).
-        # This is the statistically correct "median of sum" — but it is still
-        # not guaranteed that median(InFP)+median(OutFP) == median(All), so we
-        # rescale below to keep the displayed split summing to the displayed
-        # total (resolving Edit #3 from the user feedback).
-        infp = top.apply(
-            lambda r: _split_median(infp_cats, r['TargetYear'], r['Action'], r['SLR']),
-            axis=1,
-        )
-        outfp = top.apply(
-            lambda r: _split_median(outfp_cats, r['TargetYear'], r['Action'], r['SLR']),
-            axis=1,
-        )
-        infp_v  = infp.astype(float).values
-        outfp_v = outfp.astype(float).values
-        split_sum = infp_v + outfp_v
-        total_v = top['Total_CumEAD_P50'].astype(float).values
-        scale = np.where(split_sum > 0, total_v / split_sum, 0.0)
-        top['InFP_CumEAD_P50']  = infp_v  * scale
-        top['OutFP_CumEAD_P50'] = outfp_v * scale
-        top['Num_Buildings'] = bldg_counts[occ]
-        agg_by_occ[occ] = top.reset_index(drop=True)
-
-    # WL_P50 / WL_P90 — same role as in the ALL loader, see notes there.
-    wl_data = {}
-    for slr_key, sheet_name in (('50th-percentile', 'WL_P50'),
-                                ('90th-percentile', 'WL_P90')):
-        try:
-            wl_df = _read_excel_fast(filepath, sheet_name)
-            if 'Year' in wl_df.columns:
-                wl_data[slr_key] = wl_df
-        except Exception:
-            pass
-
-    return {
-        'buildings':  df_buildings,
-        'agg_by_occ': agg_by_occ,
-        'bldg_attrs': bld,
-        'water_levels': wl_data,
-    }
-
-
-@st.cache_data
-def load_xlsx_file(filepath):
-    """Load Excel file and return a dict of sheets (legacy format)."""
-    xls = pd.ExcelFile(filepath)
-    sheets = {}
-    for sheet_name in xls.sheet_names:
-        sheets[sheet_name] = pd.read_excel(xls, sheet_name)
-    return sheets
-
-
-def _detect_workbook_format(filepath):
-    """Identify the result-workbook variant by inspecting its sheet names.
-
-    Returns one of:
-      * ``'all'``    — pre-aggregated percentile workbook (``bldg_CumEAD``)
-      * ``'mc'``     — Monte-Carlo realization workbook (``bldg_CumEAD_MC``)
-      * ``'legacy'`` — older Aggregated/PerBuilding two-sheet layout
-      * ``None``     — unrecognized / unreadable
+    The bundle ships the underlying 1,000 MC realizations (Year × MC_0001..
+    MC_1000) per SLR scenario instead of pre-baked percentiles. We expose
+    a percentile DataFrame for any consumer that wants P05/P50/P95-style
+    bands; the raw MC matrix is also kept on the data_store for any new
+    threshold-exceedance / per-building exposure feature.
     """
+    mc_cols = [c for c in wl_mc.columns if c.startswith('MC_')]
+    arr = wl_mc[mc_cols].to_numpy(dtype=float)
+    out = pd.DataFrame({'Year': wl_mc['Year'].astype(int).values})
+    for p in [1,2,3,4,5,6,7,8,9,10,25,50,75,90,91,92,93,94,95,96,97,98,99]:
+        out[f'P{p:02d}'] = np.percentile(arr, p, axis=1)
+    return out
+
+
+@st.cache_data(show_spinner=False)
+def load_bundle(data_folder, location_slug):
+    """Load a single-location CSV bundle and return the data_store entry."""
+    join = lambda *p: os.path.join(data_folder, *p)
+
+    # 1. Metadata
+    metadata = _bundle_read_metadata(join(f'{location_slug}_metadata.csv'))
+    bfe_ft = float(metadata.get('BFE_FT_NAVD88', 9))
+
+    # Map TargetYear int → display label (2025 → 'Potential', etc.)
+    target_year_labels = {}
+    if ('TARGET_YEARS' in metadata
+            and 'TARGET_YEAR_LABELS' in metadata
+            and len(metadata['TARGET_YEARS']) == len(metadata['TARGET_YEAR_LABELS'])):
+        for ys, lab in zip(metadata['TARGET_YEARS'], metadata['TARGET_YEAR_LABELS']):
+            try:
+                target_year_labels[int(ys)] = lab
+            except ValueError:
+                continue
+
+    # 2. NSI (271 rows incl. the building that gets skipped — joined later)
+    nsi = pd.read_excel(join(f'DDD___{location_slug}___NSI.xlsx'))
+
+    # 3. Building lookup (270 rows — only buildings that were actually analyzed)
+    lookup = pd.read_csv(join(f'{location_slug}_bldg_lookup.csv'))
+    bldg_attrs = _bundle_build_attrs_table(lookup, nsi)
+
+    # 4. Skipped-buildings log (small, possibly empty)
     try:
-        xls = pd.ExcelFile(filepath)
-    except Exception:
-        return None
-    sheet_names = set(xls.sheet_names)
-    # The ALL format is checked BEFORE the MC format because both share the
-    # 'Buildings' and 'CumEAD_Categories' sheets — the discriminator is
-    # 'bldg_CumEAD' (ALL) vs 'bldg_CumEAD_MC' (MC).
-    if {'Buildings', 'CumEAD_Categories', 'bldg_CumEAD'}.issubset(sheet_names):
-        return 'all'
-    if {'Buildings', 'CumEAD_Categories', 'bldg_CumEAD_MC'}.issubset(sheet_names):
-        return 'mc'
-    if {'Aggregated', 'PerBuilding'}.intersection(sheet_names):
-        return 'legacy'
-    return None
+        skipped = pd.read_csv(join(f'{location_slug}_skipped_buildings.csv'))
+    except (FileNotFoundError, pd.errors.EmptyDataError):
+        skipped = pd.DataFrame()
+
+    # 5. Per-building cumulative damage
+    bldg_dmg = pd.read_csv(join(f'{location_slug}_bldg_CumulativeDamage.csv'))
+    bldg_dmg = bldg_dmg.rename(columns={'BuildingID': 'id'})
+    bldg_dmg['TargetYear'] = _bundle_normalize_target_year(bldg_dmg['TargetYear'])
+    pct_present = [p for p in BUNDLE_PCT_LIST if p in bldg_dmg.columns]
+    pct_keep = [p for p in PER_BLDG_PCT_KEEP if p in pct_present]
+    bldg_dmg = bldg_dmg.drop(columns=[p for p in pct_present if p not in pct_keep])
+    bldg_dmg = bldg_dmg.rename(columns={p: f'CumEAD_{p}' for p in pct_keep})
+
+    # Merge attrs onto every (id, year, action, slr) row so each row carries
+    # the descriptive context the Map / Details / Distributions tabs need.
+    df_buildings = bldg_dmg.merge(bldg_attrs, on='id', how='left')
+
+    # 6. Categories — derive All / Residential / Non-Residential rollups
+    cat = pd.read_csv(join(f'{location_slug}_CumulativeDamage_categories.csv'))
+    cat['TargetYear'] = _bundle_normalize_target_year(cat['TargetYear'])
+
+    is_res = bldg_attrs['occupancy_type'].apply(is_residential)
+    bldg_counts = {
+        'All':             int(len(bldg_attrs)),
+        'Residential':     int(is_res.sum()),
+        'Non-Residential': int((~is_res).sum()),
+    }
+    filter_map = {
+        'All':             {'all':   ['RES_InFP', 'RES_OutFP', 'NONRES_InFP', 'NONRES_OutFP'],
+                            'infp':  ['RES_InFP', 'NONRES_InFP'],
+                            'outfp': ['RES_OutFP', 'NONRES_OutFP']},
+        'Residential':     {'all':   ['RES_InFP', 'RES_OutFP'],
+                            'infp':  ['RES_InFP'],
+                            'outfp': ['RES_OutFP']},
+        'Non-Residential': {'all':   ['NONRES_InFP', 'NONRES_OutFP'],
+                            'infp':  ['NONRES_InFP'],
+                            'outfp': ['NONRES_OutFP']},
+    }
+    grp_cols = ['TargetYear', 'Action', 'SLR']
+    cat_pcts_present = [p for p in BUNDLE_PCT_LIST if p in cat.columns]
+
+    agg_by_occ = {}
+    for occ, fmap in filter_map.items():
+        sub_total = cat[cat['Category'].isin(fmap['all'])]
+        if sub_total.empty:
+            agg_by_occ[occ] = pd.DataFrame()
+            continue
+        # Sum leaves percentile-by-percentile. The total is sum-of-medians,
+        # an approximation of median-of-sum — but because we sum the same
+        # leaves for InFP and OutFP, the split is exactly reconciled.
+        total = sub_total.groupby(grp_cols, as_index=False)[cat_pcts_present].sum()
+        total = total.rename(columns={p: f'Total_CumEAD_{p}' for p in cat_pcts_present})
+
+        sub_in = cat[cat['Category'].isin(fmap['infp'])]
+        in_p50 = (sub_in.groupby(grp_cols, as_index=False)['P50'].sum()
+                  if not sub_in.empty
+                  else pd.DataFrame(columns=grp_cols + ['P50']))
+        in_p50 = in_p50.rename(columns={'P50': 'InFP_CumEAD_P50'})
+
+        sub_out = cat[cat['Category'].isin(fmap['outfp'])]
+        out_p50 = (sub_out.groupby(grp_cols, as_index=False)['P50'].sum()
+                   if not sub_out.empty
+                   else pd.DataFrame(columns=grp_cols + ['P50']))
+        out_p50 = out_p50.rename(columns={'P50': 'OutFP_CumEAD_P50'})
+
+        merged = (total.merge(in_p50, on=grp_cols, how='left')
+                       .merge(out_p50, on=grp_cols, how='left'))
+        merged['InFP_CumEAD_P50']  = merged['InFP_CumEAD_P50'].fillna(0.0)
+        merged['OutFP_CumEAD_P50'] = merged['OutFP_CumEAD_P50'].fillna(0.0)
+        merged['Num_Buildings'] = bldg_counts[occ]
+        agg_by_occ[occ] = merged.reset_index(drop=True)
+
+    # 7. Water levels — load raw MC + pre-compute percentile shim
+    water_levels = {}
+    for slr_key, fname_suffix in (('50th-percentile', 'P50'),
+                                   ('90th-percentile', 'P90')):
+        wl_path = join(f'DDD___{location_slug}_MC_annual_max_waterlevels_{fname_suffix}.csv')
+        try:
+            wl_mc = pd.read_csv(wl_path)
+        except FileNotFoundError:
+            continue
+        if 'Year' not in wl_mc.columns:
+            continue
+        water_levels[slr_key] = _bundle_wl_percentiles_from_mc(wl_mc)
+        # Raw MC ensemble, suffixed `_mc` so legacy code paths that iterate
+        # `for slr in water_levels` and assume percentile rows ignore them.
+        water_levels[f'{slr_key}_mc'] = wl_mc
+
+    return {
+        'buildings':          df_buildings,
+        'agg':                agg_by_occ.get('All'),
+        'agg_by_occ':         agg_by_occ,
+        'bldg_attrs':         bldg_attrs,
+        'water_levels':       water_levels,
+        'metadata':           metadata,
+        'skipped':            skipped,
+        'bfe_ft':             bfe_ft,
+        'target_year_labels': target_year_labels,
+        'format':             'bundle',
+        'location_slug':      location_slug,
+    }
 
 
-def _is_new_format(filepath):
-    """Backward-compat shim — True for any non-legacy workbook."""
-    return _detect_workbook_format(filepath) in ('all', 'mc')
+def _bundle_pretty_location_name(slug):
+    """Turn 'MasticBeach' into 'Mastic Beach'. Falls back to a sensible
+    rendering of the slug (CamelCase-split or underscore-replaced) when
+    the slug isn't in the known-locations table."""
+    pretty = parse_filename(slug + '.csv')
+    # parse_filename's known-pattern path returns names with spaces
+    # ('Mastic Beach'); its fallback path returns the slug unchanged. We
+    # only trust the result when it actually inserted a space — otherwise
+    # we run our own CamelCase-aware splitter to handle slugs the table
+    # doesn't know about.
+    if pretty != 'Unknown Location' and ' ' in pretty:
+        return pretty
+    # Generic fallback: replace underscores with spaces, then split CamelCase
+    # boundaries (keeps acronyms intact: 'NYCBay' → 'NYC Bay').
+    import re
+    s = slug.replace('_', ' ')
+    s = re.sub(r'(?<=[a-z])([A-Z])', r' \1', s)
+    s = re.sub(r'([A-Z]+)([A-Z][a-z])', r'\1 \2', s)
+    return s.strip()
 
 
 def load_data_from_folder(data_folder="."):
-    """Load all data files from the data folder. Supports three workbook
-    layouts:
+    """Discover bundles in `data_folder` and return the data_store.
 
-      * **ALL format** (preferred): pre-aggregated percentile columns
-        (``bldg_CumEAD``, ``CumEAD_Categories`` with P01–P99). Loaded by
-        :func:`load_xlsx_file_all_format` — fastest path.
-      * **MC format** (legacy 'new'): raw Monte-Carlo realizations
-        (``bldg_CumEAD_MC`` with 1,000 MC_xxxx columns). Loaded by
-        :func:`load_xlsx_file_new_format` — falls back to per-load percentile
-        computation.
-      * **Legacy format**: ``Aggregated`` + ``PerBuilding`` two-sheet layout.
-
-    When multiple workbooks exist for the same location the precedence is
-    ``ALL > MC > legacy`` so the lightest, most pre-processed file wins.
+    A bundle is identified by the presence of `{slug}_metadata.csv` plus
+    the four required companion files. Locations missing any required
+    file are skipped silently — we don't claim partial bundles.
     """
     data_store = {}
+    available_locations = set()
 
     if not os.path.exists(data_folder):
         return data_store, []
 
-    available_locations = set()
-
-    # Look for xlsx files first
-    xlsx_files = glob.glob(os.path.join(data_folder, "*.xlsx")) + glob.glob(os.path.join(data_folder, "*.XLSX"))
-
-    # Prefer the ALL workbook over the MC workbook over legacy. The filename
-    # convention "_Results_ALL.xlsx" / "_Results_new.xlsx" makes this trivial,
-    # but we sort by filename only — the actual format is determined by sheet
-    # contents in _detect_workbook_format below.
-    def _sort_key(path):
-        name = os.path.basename(path).lower()
-        if '_results_all' in name:
-            rank = 0
-        elif '_results_new' in name:
-            rank = 1
+    metas = sorted(glob.glob(os.path.join(data_folder, '*_metadata.csv')))
+    for meta_path in metas:
+        slug = os.path.basename(meta_path)[:-len('_metadata.csv')]
+        required = [
+            f'{slug}_bldg_lookup.csv',
+            f'{slug}_bldg_CumulativeDamage.csv',
+            f'{slug}_CumulativeDamage_categories.csv',
+            f'DDD___{slug}___NSI.xlsx',
+        ]
+        if not all(os.path.exists(os.path.join(data_folder, r)) for r in required):
+            continue
+        try:
+            entry = load_bundle(data_folder, slug)
+        except Exception as e:
+            # Don't kill the app on a malformed bundle — log and skip.
+            print(f"[loader] failed to load '{slug}': {e}")
+            continue
+        # Use the metadata's own LOCATION when present; fall back to slug.
+        location_name = entry['metadata'].get('LOCATION', '').strip().strip('"')
+        if not location_name:
+            location_name = _bundle_pretty_location_name(slug)
         else:
-            rank = 2
-        return (rank, name)
-    xlsx_files = sorted(xlsx_files, key=_sort_key)
-
-    seen_new_format = set()   # locations already covered by an ALL or MC file
-
-    for filepath in xlsx_files:
-        filename = os.path.basename(filepath)
-        location = parse_filename(filename)
-
-        # If we already loaded a non-legacy file for this location, skip any
-        # remaining file to avoid overwriting with less-precise/heavier data.
-        if location in seen_new_format:
-            continue
-
-        available_locations.add(location)
-
-        if location not in data_store:
-            data_store[location] = {'agg': None, 'buildings': None,
-                                    'agg_by_occ': None, 'format': None}
-
-        fmt = _detect_workbook_format(filepath)
-
-        if fmt == 'all':
-            new_data = load_xlsx_file_all_format(filepath)
-            data_store[location]['buildings'] = new_data['buildings']
-            data_store[location]['agg_by_occ'] = new_data['agg_by_occ']
-            data_store[location]['agg']        = new_data['agg_by_occ'].get('All')
-            data_store[location]['format']     = 'all'
-            seen_new_format.add(location)
-            continue
-
-        if fmt == 'mc':
-            new_data = load_xlsx_file_new_format(filepath)
-            data_store[location]['buildings'] = new_data['buildings']
-            data_store[location]['agg_by_occ'] = new_data['agg_by_occ']
-            data_store[location]['agg']        = new_data['agg_by_occ'].get('All')
-            data_store[location]['format']     = 'new'
-            seen_new_format.add(location)
-            continue
-
-        # --- Legacy summary format fallback ---
-        sheets = load_xlsx_file(filepath)
-
-        if 'Aggregated' in sheets:
-            data_store[location]['agg'] = sheets['Aggregated']
-        if 'PerBuilding' in sheets:
-            df = sheets['PerBuilding']
-            if 'Floodplain_Status' in df.columns:
-                df['Floodplain_Status'] = df['Floodplain_Status'].apply(convert_floodplain_status)
-            data_store[location]['buildings'] = df
-        data_store[location]['format'] = 'legacy'
-
-    # Fall back to csv files (very old legacy format)
-    if not xlsx_files:
-        csv_files = glob.glob(os.path.join(data_folder, "*.csv")) + glob.glob(os.path.join(data_folder, "*.CSV"))
-
-        for filepath in csv_files:
-            filename = os.path.basename(filepath)
-            location = parse_filename(filename)
-            available_locations.add(location)
-
-            if location not in data_store:
-                data_store[location] = {'agg': None, 'buildings': None,
-                                        'agg_by_occ': None, 'format': 'legacy'}
-
-            df = load_csv_file(filepath)
-
-            if 'CSV1' in filename.upper() or 'AGGREGATED' in filename.upper():
-                data_store[location]['agg'] = df
-            elif 'CSV2' in filename.upper() or 'PERBUILDING' in filename.upper() or 'PER_BUILDING' in filename.upper():
-                if 'Floodplain_Status' in df.columns:
-                    df['Floodplain_Status'] = df['Floodplain_Status'].apply(convert_floodplain_status)
-                data_store[location]['buildings'] = df
+            # Even when LOCATION is set, prefer the human-readable form
+            # from parse_filename if it knows the slug (e.g. MasticBeach →
+            # Mastic Beach).
+            pretty = _bundle_pretty_location_name(slug)
+            if pretty != slug:
+                location_name = pretty
+        data_store[location_name] = entry
+        available_locations.add(location_name)
 
     return data_store, sorted(list(available_locations))
 
@@ -1679,10 +1457,36 @@ def main():
         elif df_agg_raw is not None and 'TargetYear' in df_agg_raw.columns:
             available_years = sorted(df_agg_raw['TargetYear'].unique())
         
+        # Per-bundle TargetYear label map ('Potential' for the 2025 baseline,
+        # '2040'/'2055'/'2100' otherwise). Falls back to the raw int when a
+        # location doesn't ship the labels (e.g. legacy data).
+        target_year_labels = {}
+        if loc_entry is not None and isinstance(loc_entry.get('target_year_labels'), dict):
+            target_year_labels = loc_entry['target_year_labels']
+        
+        def _format_target_year(y):
+            label = target_year_labels.get(int(y), str(int(y)))
+            # When the label differs from the bare year, show both so the
+            # user knows what year 'Potential' actually represents.
+            if label != str(int(y)):
+                return f"{label} ({int(y)})"
+            return str(int(y))
+        
+        # Default to the first non-baseline horizon (typically 2040) — opening
+        # the app on "Potential" hides the SLR-driven escalation that's the
+        # whole point of the tool.
+        default_idx = 0
+        if len(available_years) > 1:
+            for i, y in enumerate(available_years):
+                if target_year_labels.get(int(y)) not in (None, 'Potential'):
+                    default_idx = i
+                    break
+        
         target_year = st.selectbox(
             "📅 Target Year",
             options=available_years,
-            index=0
+            index=default_idx,
+            format_func=_format_target_year,
         )
         
         available_scenarios = ['50th-percentile', '90th-percentile']
@@ -1714,7 +1518,24 @@ def main():
         
         if df_buildings is not None:
             st.divider()
-            st.caption(f"**Buildings loaded:** {df_buildings['id'].nunique():,}")
+            n_loaded = df_buildings['id'].nunique()
+            st.caption(f"**Buildings loaded:** {n_loaded:,}")
+            # When the bundle ships a skipped-buildings log, surface a small
+            # transparency note so users know the inventory isn't claiming
+            # 100% coverage. `loc_entry` may be None if no location is
+            # selected yet.
+            if loc_entry is not None:
+                skipped_df = loc_entry.get('skipped')
+                if isinstance(skipped_df, pd.DataFrame) and len(skipped_df) > 0:
+                    n_skipped = len(skipped_df)
+                    plural = 's' if n_skipped != 1 else ''
+                    st.caption(
+                        f"⚠️ {n_skipped} building{plural} excluded from the analysis "
+                        f"(see *Data Notes* below the map)."
+                    )
+                bfe_ft = loc_entry.get('bfe_ft')
+                if bfe_ft is not None:
+                    st.caption(f"BFE: **{bfe_ft:g} ft NAVD88** (DFE = BFE+2)")
     
     # ========================================================================
     # PAGE TITLE — centered, bold, above the tabs
@@ -2176,9 +1997,10 @@ def main():
             unsafe_allow_html=True
         )
         
-        # The map requires per-building longitude/latitude. The new-format
-        # workbook doesn't carry those columns, so fall back to an info
-        # message instead of rendering a broken map.
+        # The map requires per-building longitude/latitude. The bundle
+        # format guarantees these columns are present (they live in
+        # bldg_lookup.csv). The guard remains as a safety net for any
+        # future loader that might not populate them.
         _has_coords = (
             df_buildings is not None
             and {'longitude', 'latitude'}.issubset(df_buildings.columns)
@@ -2188,9 +2010,8 @@ def main():
 
         if df_buildings is not None and not _has_coords:
             st.info(
-                "🗺️ Map view is unavailable for this dataset — the result "
-                "workbook does not include per-building longitude/latitude "
-                "columns. All other tabs remain fully functional."
+                "🗺️ Map view is unavailable for this dataset — building "
+                "coordinates are missing. All other tabs remain fully functional."
             )
         elif df_buildings is not None:
             st.subheader(f"Building Risk Map — {location_name} ({occupancy_label}) — {target_year}, {scenario}")
@@ -2292,12 +2113,38 @@ def main():
                     df_map['_is_nonres'] = is_nonres_series.values
                     
                     # ---- Build the standard hover text (shared across all views) ----
+                    # Header line: prefer street address when available, fall
+                    # back to building ID. Address comes from the NSI (66/270
+                    # Shinnecock buildings have it; field is None elsewhere).
                     hover_texts = []
                     for idx, row in df_map.iterrows():
-                        text = f"<b>Building #{row['id']}</b><br>"
+                        addr = row.get('address') if 'address' in row else None
+                        if pd.notna(addr) and str(addr).strip():
+                            text = f"<b>{addr}</b><br><span style='color:#94a3b8'>#{row['id']}</span><br>"
+                        else:
+                            text = f"<b>Building #{row['id']}</b><br>"
                         
+                        # Type / occupancy
                         if 'occupancy_type' in row:
-                            text += f"Type: {row['occupancy_type']}<br>"
+                            text += f"Type: {row['occupancy_type']}"
+                            # Stories / area inline so the hover stays compact
+                            extras = []
+                            if 'number_of_stories' in row and pd.notna(row['number_of_stories']):
+                                extras.append(f"{int(row['number_of_stories'])} st.")
+                            if 'area' in row and pd.notna(row['area']):
+                                extras.append(f"{int(row['area']):,} sf")
+                            if extras:
+                                text += " · " + " · ".join(extras)
+                            text += "<br>"
+                        # Foundation / year built
+                        fnd_bits = []
+                        if 'foundation_type' in row and pd.notna(row.get('foundation_type')):
+                            fnd_bits.append(f"foundation {row['foundation_type']}")
+                        if 'year_built' in row and pd.notna(row.get('year_built')):
+                            fnd_bits.append(f"built {int(row['year_built'])}")
+                        if fnd_bits:
+                            text += " · ".join(fnd_bits) + "<br>"
+                        
                         if 'structure_value' in row and pd.notna(row['structure_value']):
                             text += f"Structure Value: {format_currency(row['structure_value'])}<br>"
                         if 'Floodplain_Status' in row:
@@ -2961,6 +2808,96 @@ def main():
                     st.dataframe(top10, use_container_width=True, hide_index=True)
         else:
             st.warning("No per-building data available for this location.")
+        
+        # --------------------------------------------------------------
+        # Data Notes — provenance / coverage information for the bundle
+        # --------------------------------------------------------------
+        # Surfaced below the map so users have a one-click path to
+        # check what's in the inventory, what got skipped, and which
+        # hazard inputs the analysis used. The expander stays collapsed
+        # by default to keep the main view clean.
+        if loc_entry is not None:
+            with st.expander("ℹ️ Data Notes — coverage, exclusions, and bundle metadata", expanded=False):
+                meta = loc_entry.get('metadata') or {}
+                bfe_ft_local = loc_entry.get('bfe_ft')
+                
+                # Coverage line
+                bldg_attrs = loc_entry.get('bldg_attrs')
+                n_total = int(len(bldg_attrs)) if bldg_attrs is not None else None
+                skipped_df = loc_entry.get('skipped')
+                n_skipped = len(skipped_df) if isinstance(skipped_df, pd.DataFrame) else 0
+                
+                cov_col1, cov_col2, cov_col3 = st.columns(3)
+                with cov_col1:
+                    if n_total is not None:
+                        st.markdown(f"**Buildings analyzed**  \n{n_total:,}")
+                with cov_col2:
+                    if bfe_ft_local is not None:
+                        st.markdown(f"**Base Flood Elevation (BFE)**  \n{bfe_ft_local:g} ft NAVD88")
+                        st.caption(f"DFE = BFE + 2 = {bfe_ft_local + 2:g} ft NAVD88")
+                with cov_col3:
+                    target_year_labels_local = loc_entry.get('target_year_labels') or {}
+                    if target_year_labels_local:
+                        years_str = ", ".join(
+                            f"{lab} ({y})" if lab != str(y) else str(y)
+                            for y, lab in sorted(target_year_labels_local.items())
+                        )
+                        st.markdown(f"**Evaluation horizons**  \n{years_str}")
+                
+                # Skipped buildings table — only shown when there are any.
+                if n_skipped > 0:
+                    st.markdown("---")
+                    st.markdown(f"**Excluded buildings ({n_skipped})**")
+                    st.caption(
+                        "These buildings appear in the National Structure Inventory for "
+                        "this location but were excluded from the damage analysis "
+                        "(typically due to invalid or incomplete attributes)."
+                    )
+                    # Show the relevant columns; the CSV ships
+                    # BuildingID / NSI_row / OccupancyType / SOID / Reason
+                    show_cols = [c for c in ['BuildingID', 'OccupancyType', 'Reason']
+                                 if c in skipped_df.columns]
+                    st.dataframe(
+                        skipped_df[show_cols] if show_cols else skipped_df,
+                        use_container_width=True, hide_index=True,
+                    )
+                
+                # Bundle metadata — small, gray, for the technically curious.
+                if meta:
+                    st.markdown("---")
+                    st.caption("**Bundle metadata**")
+                    # Format key fields nicely; dump the rest as a list.
+                    pretty_lines = []
+                    if 'LOCATION' in meta:
+                        pretty_lines.append(f"Location: **{meta['LOCATION']}**")
+                    if 'n_res' in meta and 'n_nonres' in meta:
+                        pretty_lines.append(
+                            f"Residential: **{meta['n_res']}** · "
+                            f"Non-Residential: **{meta['n_nonres']}**"
+                        )
+                    actions_meta = meta.get('ACTION_NAMES')
+                    if isinstance(actions_meta, list):
+                        pretty_lines.append("Adaptation actions: " + ", ".join(f"`{a}`" for a in actions_meta))
+                    pcts_meta = meta.get('PERCENTILES')
+                    if isinstance(pcts_meta, list):
+                        pretty_lines.append(
+                            f"Percentiles available: **{len(pcts_meta)}** "
+                            f"({pcts_meta[0]}–{pcts_meta[-1]}, dense at tails plus quartiles)"
+                        )
+                    # Water-level MC realizations
+                    wl = loc_entry.get('water_levels') or {}
+                    mc_keys = [k for k in wl.keys() if k.endswith('_mc')]
+                    if mc_keys:
+                        # Use the first MC sheet to count realizations
+                        first_mc = wl[mc_keys[0]]
+                        n_mc = sum(1 for c in first_mc.columns if c.startswith('MC_'))
+                        n_years = len(first_mc)
+                        pretty_lines.append(
+                            f"Water-level Monte Carlo: **{n_mc:,}** annual-max realizations × "
+                            f"**{n_years}** years × {len(mc_keys)} SLR scenarios"
+                        )
+                    if pretty_lines:
+                        st.markdown("\n".join(f"- {ln}" for ln in pretty_lines))
     
     # ========================================================================
     # TAB 1: COMMUNITY SUMMARY
@@ -3282,6 +3219,35 @@ def main():
                 fig_line.update_layout(yaxis_title="Cumulative Damage",
                                        xaxis_title="Year", height=400)
                 fig_line.update_yaxes(tickmode='array', tickvals=l_ticks, ticktext=l_labels)
+                # Custom x-axis ticks so the 2025 baseline reads as
+                # 'Potential' (the bundle's display label) — matches the
+                # sidebar selector. Other years tick as plain integers.
+                _xs = sorted(df_timeline['TargetYear'].unique())
+                _x_labels = [
+                    target_year_labels.get(int(y), str(int(y))) if str(target_year_labels.get(int(y), str(int(y)))) != str(int(y))
+                    else str(int(y))
+                    for y in _xs
+                ]
+                fig_line.update_xaxes(tickmode='array', tickvals=_xs, ticktext=_x_labels)
+                # When a 'Potential' point is present, drop a faint vertical
+                # line + annotation so users see it's the *today* baseline,
+                # not just an early year on a smooth ramp.
+                potential_year = next(
+                    (int(y) for y, lab in target_year_labels.items() if lab == 'Potential'),
+                    None,
+                )
+                if potential_year is not None and potential_year in _xs:
+                    fig_line.add_vline(
+                        x=potential_year, line_width=1, line_dash='dot',
+                        line_color='#94a3b8',
+                    )
+                    fig_line.add_annotation(
+                        x=potential_year, y=1, yref='paper',
+                        text="Today", showarrow=False,
+                        xanchor='left', yanchor='top',
+                        font=dict(size=10, color='#64748b'),
+                        xshift=4, yshift=-2,
+                    )
                 st.plotly_chart(fig_line, use_container_width=True)
             
             # ----------------------------------------------------------------
@@ -3493,7 +3459,15 @@ def main():
                 building_dfe_status = building_info.get('Floodplain_Status', 'Unknown')
                 is_above_dfe = building_dfe_status == 'Above DFE'
                 
-                st.subheader(f"Building #{selected_id}")
+                # Header line: lead with the address when we have one (NSI
+                # ships them for ~75% of buildings); fall back to the bare
+                # ID otherwise. Either way, the ID stays visible.
+                addr = building_info.get('address') if 'address' in building_info else None
+                if pd.notna(addr) and str(addr).strip():
+                    st.subheader(f"{addr}")
+                    st.caption(f"Building #{selected_id}")
+                else:
+                    st.subheader(f"Building #{selected_id}")
                 
                 col1, col2, col3, col4 = st.columns(4)
                 
@@ -3507,7 +3481,8 @@ def main():
                 with col2:
                     if 'year_built' in building_info:
                         st.markdown("**Year Built**")
-                        st.write(building_info.get('year_built', 'N/A'))
+                        yr = building_info.get('year_built')
+                        st.write(f"{int(yr)}" if pd.notna(yr) else 'N/A')
                     if 'area' in building_info:
                         st.markdown("**Area (sf)**")
                         area = building_info.get('area', 0)
@@ -3533,6 +3508,93 @@ def main():
                             st.error(fp_status)
                         else:
                             st.success(fp_status)
+                
+                # Building-type and SOID provenance row — small, gray,
+                # optional. Only renders when the bundle ships these fields.
+                provenance_bits = []
+                if pd.notna(building_info.get('building_type')):
+                    provenance_bits.append(f"Building type: **{building_info['building_type']}**")
+                if pd.notna(building_info.get('SOID')):
+                    provenance_bits.append(f"Structural Occupancy ID: **{building_info['SOID']}**")
+                if 'foundation_height' in building_info and pd.notna(building_info.get('foundation_height')):
+                    provenance_bits.append(f"Foundation height: **{building_info['foundation_height']:.1f} ft**")
+                if 'ground_elevation' in building_info and pd.notna(building_info.get('ground_elevation')):
+                    provenance_bits.append(f"Ground elevation: **{building_info['ground_elevation']:.2f} ft NAVD88**")
+                if provenance_bits:
+                    st.caption(" · ".join(provenance_bits))
+                
+                # ----------------------------------------------------------
+                # Annual-max water level exposure panel
+                # ----------------------------------------------------------
+                # Direct decision-support metric the bundle's raw MC
+                # ensemble unlocks: P(annual-max stillwater ≥ FFE) for this
+                # building, evaluated year-by-year under both SLR scenarios.
+                # We compute against the raw 1,000-realization MC sheets
+                # (water_levels[<slr>_mc]); when those aren't available we
+                # silently skip — no fallback to percentile interpolation
+                # since those would be misleading for a binary threshold.
+                ffe_val = building_info.get('FFE_ft')
+                bfe_local = (loc_entry or {}).get('bfe_ft')
+                wl_data = (loc_entry or {}).get('water_levels') or {}
+                if (pd.notna(ffe_val) and ffe_val
+                        and ('50th-percentile_mc' in wl_data
+                             or '90th-percentile_mc' in wl_data)):
+                    st.divider()
+                    st.subheader("Annual flood exposure")
+                    st.caption(
+                        "Probability that the annual-maximum stillwater level reaches or "
+                        f"exceeds this building's first-floor elevation "
+                        f"(**{ffe_val:.2f} ft NAVD88**) in each evaluation year, "
+                        "computed directly from the 1,000-realization Monte Carlo ensemble."
+                    )
+                    
+                    # Available years from the bundle metadata (or fall back
+                    # to the years present in the per-building damage table).
+                    target_years_local = sorted(df_traj['TargetYear'].unique())
+                    
+                    exp_rows = []
+                    for slr_key, slr_label in (('50th-percentile', 'Median SLR (P50)'),
+                                                ('90th-percentile', 'High-End SLR (P90)')):
+                        mc_df = wl_data.get(f'{slr_key}_mc')
+                        if mc_df is None or 'Year' not in mc_df.columns:
+                            continue
+                        mc_cols = [c for c in mc_df.columns if c.startswith('MC_')]
+                        if not mc_cols:
+                            continue
+                        for yr in target_years_local:
+                            yr_mc = mc_df[mc_df['Year'] == int(yr)]
+                            if yr_mc.empty:
+                                continue
+                            arr = yr_mc[mc_cols].to_numpy(dtype=float).flatten()
+                            n = arr.size
+                            if n == 0:
+                                continue
+                            p_ffe = float((arr >= ffe_val).sum()) / n
+                            p_bfe = (float((arr >= bfe_local).sum()) / n
+                                     if bfe_local is not None else float('nan'))
+                            label = target_year_labels.get(int(yr), str(int(yr)))
+                            exp_rows.append({
+                                'SLR Scenario':         slr_label,
+                                'Year':                 label,
+                                f'P(WL ≥ FFE = {ffe_val:.1f} ft)':
+                                    f"{p_ffe*100:.1f}%",
+                                **({f'P(WL ≥ BFE = {bfe_local:g} ft)':
+                                    f"{p_bfe*100:.1f}%"}
+                                   if bfe_local is not None else {}),
+                                'Median annual max (ft)': f"{float(np.median(arr)):.2f}",
+                                'P95 annual max (ft)':    f"{float(np.percentile(arr, 95)):.2f}",
+                            })
+                    
+                    if exp_rows:
+                        st.dataframe(pd.DataFrame(exp_rows),
+                                     use_container_width=True, hide_index=True)
+                        st.caption(
+                            "**P(WL ≥ FFE)** is the simulated annual exceedance "
+                            "probability for this building's first floor — a direct, "
+                            "decision-relevant counterpart to the cumulative-damage "
+                            "estimates below. Years and SLR trajectories use the "
+                            "same MC realizations that fed the damage chain."
+                        )
                 
                 st.divider()
                 
@@ -3598,9 +3660,14 @@ def main():
                         plot_bgcolor='white',
                         margin=dict(l=60, r=20, t=70, b=50),
                     )
+                    _bd_xs = sorted(df_traj['TargetYear'].unique())
+                    _bd_x_labels = [
+                        target_year_labels.get(int(y), str(int(y)))
+                        for y in _bd_xs
+                    ]
                     fig_building.update_xaxes(
                         showgrid=True, gridcolor='#e5e7eb',
-                        tickmode='array', tickvals=sorted(df_traj['TargetYear'].unique()),
+                        tickmode='array', tickvals=_bd_xs, ticktext=_bd_x_labels,
                         showline=True, linecolor='#cbd5e1')
                     fig_building.update_yaxes(
                         showgrid=True, gridcolor='#e5e7eb',
@@ -4058,10 +4125,15 @@ def main():
                     legend=dict(orientation='h', yanchor='bottom', y=1.02,
                                 xanchor='right', x=1, bgcolor='rgba(255,255,255,0.85)'),
                 )
+                _trend_xs = sorted(df_slr['TargetYear'].unique())
+                _trend_x_labels = [
+                    target_year_labels.get(int(y), str(int(y)))
+                    for y in _trend_xs
+                ]
                 fig_trend.update_xaxes(
                     title="Year", showgrid=True, gridcolor='#e5e7eb',
                     showline=True, linecolor='#cbd5e1',
-                    tickmode='array', tickvals=sorted(df_slr['TargetYear'].unique()),
+                    tickmode='array', tickvals=_trend_xs, ticktext=_trend_x_labels,
                 )
                 fig_trend.update_yaxes(
                     title="Cumulative Damage", showgrid=True, gridcolor='#e5e7eb',
