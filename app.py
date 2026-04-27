@@ -1526,15 +1526,18 @@ def main():
         
         def _format_target_year(y):
             label = target_year_labels.get(int(y), str(int(y)))
-            # When the label differs from the bare year, show both so the
-            # user knows what year 'Potential' actually represents.
-            if label != str(int(y)):
+            # Display rule: the bundle's 'Potential' label is an internal
+            # convention for the 2025 baseline; users find a plain year
+            # easier to reason about, so we show only the year here. Other
+            # custom labels (anything that isn't 'Potential' and isn't just
+            # the bare year) still get appended in parentheses.
+            if label != str(int(y)) and label != 'Potential':
                 return f"{label} ({int(y)})"
             return str(int(y))
         
         # Default to the first non-baseline horizon (typically 2040) — opening
-        # the app on "Potential" hides the SLR-driven escalation that's the
-        # whole point of the tool.
+        # the app on the 2025 baseline hides the SLR-driven escalation that's
+        # the whole point of the tool.
         default_idx = 0
         if len(available_years) > 1:
             for i, y in enumerate(available_years):
@@ -1856,32 +1859,40 @@ def main():
                     mask_p50   = no_p50 > thr
                     mask_sev   = no_p90 > thr
                     
+                    # --- WFP-Basement bucket: same threshold rule as Map ---
+                    # A damaged building counts here iff WFP B brings P90 ≤ $1k.
+                    # WFP B is the cheapest fix that "eliminates" damage, so the
+                    # threshold reading still makes sense for this bucket.
                     mask_wfpb = np.zeros(n_tot_s, dtype=bool)
                     if wb_p90 is not None:
-                        wb_eff = ~np.isnan(wb_p90) & (wb_p90 <= thr)
-                        mask_wfpb = any_damage & wb_eff
+                        wb_arr = np.where(np.isnan(wb_p90), no_p90, wb_p90)
+                        mask_wfpb = any_damage & (wb_arr <= thr)
                     
-                    # --- Elevation-eliminates-P90 count (strict direct rule) ---
-                    # A building counts here iff its own Elevate_P90 is at or
-                    # below the threshold. We deliberately do NOT propagate
-                    # WFP-Basement-success buildings into this bucket. The
-                    # previous version did, on the rationale that elevation
-                    # cannot be worse than WFP Basement — but the data refute
-                    # that rationale: there are buildings where Elevate_P90
-                    # substantially exceeds WFP_B_P90 (and even WFP_1st_P90),
-                    # presumably because of how elevation interacts with
-                    # foundation type, content placement, and the depth–damage
-                    # curve at high water levels. Using only the direct rule
-                    # (a) keeps the chart honest about what the data actually
-                    # say, and (b) makes the Distributions counts match the
-                    # strict least-invasive classifier the Map tab uses
-                    # (No Damage → WFP Basement → Elevation → Residual), so
-                    # the same building doesn't get assigned one category here
-                    # and a different one there.
+                    # --- Elevation bucket: dominance rule (matches the Map) ---
+                    # An "Elevation" building is one that is damaged at baseline,
+                    # WFP Basement is NOT enough on its own, AND Elevation
+                    # strictly outperforms WFP Basement on P90 — i.e., elevation
+                    # provides meaningful additional protection beyond WFP B.
+                    # This replaces the earlier strict ≤$1k rule, which was too
+                    # demanding under high MC realizations: most damaged
+                    # In-floodplain buildings can't get P90 below $1k with
+                    # elevation either, even though Elevate is substantially
+                    # better than WFP B for them (Mastic Beach 2055-50th: median
+                    # P90 ~$27k under Elevate vs ~$41k under WFP B). The
+                    # dominance rule also auto-handles the MATLAB convention
+                    # where Above-DFE buildings have Elevate = baseline (those
+                    # have Elevate ≥ WFP B by construction → they fall through
+                    # to "Residual" rather than getting credited as Elevation
+                    # successes).
                     mask_elev_works = np.zeros(n_tot_s, dtype=bool)
-                    if el_p90 is not None:
-                        elev_arr = np.where(np.isnan(el_p90), no_p90, el_p90)
-                        mask_elev_works = any_damage & (elev_arr <= thr)
+                    if el_p90 is not None and wb_p90 is not None:
+                        el_arr = np.where(np.isnan(el_p90), no_p90, el_p90)
+                        wb_arr = np.where(np.isnan(wb_p90), no_p90, wb_p90)
+                        wfpb_to_thr = wb_arr <= thr
+                        elev_dom    = el_arr < wb_arr
+                        mask_elev_works = (any_damage
+                                           & ~wfpb_to_thr
+                                           & elev_dom)
                     
                     per_scen_stats[slr_key] = {
                         'label':     slr_label,
@@ -2001,10 +2012,10 @@ def main():
                         return [100.0 * s['n_elev'] / nd if nd > 0 else 0]
                     def _c5(s): return [s['n_elev']]
                     fig5 = _make_paired_bar(
-                        f"Damaged buildings where Elevation eliminates "
-                        f"upper-tail damage by {target_year}",
+                        f"Damaged buildings where Elevation outperforms "
+                        f"WFP Basement on P90 damage by {target_year}",
                         _v5, _c5,
-                        x_left='Elevation eliminates P90 damage',
+                        x_left='Elevation strictly beats WFP Basement on P90',
                         single_group=True,
                     )
                     
@@ -2026,8 +2037,8 @@ def main():
                             'Buildings':                 f"{s['n_tot']:,}",
                             'Damaged (P90 > $0)':        f"{s['n_sev_dmg']:,}  ({100*s['n_sev_dmg']/s['n_tot']:.1f}%)" if s['n_tot'] else "—",
                             'Damaged (median > $0)':     f"{s['n_p50_dmg']:,}  ({100*s['n_p50_dmg']/s['n_tot']:.1f}%)" if s['n_tot'] else "—",
-                            'WFP Basement eliminates P90':   f"{s['n_wfpb']:,}  ({100*s['n_wfpb']/nd:.1f}%)" if nd > 0 else "—",
-                            'Elevation eliminates P90':      f"{s['n_elev']:,}  ({100*s['n_elev']/nd:.1f}%)" if nd > 0 else "—",
+                            'WFP Basement eliminates P90':       f"{s['n_wfpb']:,}  ({100*s['n_wfpb']/nd:.1f}%)" if nd > 0 else "—",
+                            'Elevation > WFP B (where WFP B fails)': f"{s['n_elev']:,}  ({100*s['n_elev']/nd:.1f}%)" if nd > 0 else "—",
                         })
                     if tbl_rows:
                         st.markdown("**Per-scenario summary**")
@@ -2041,9 +2052,12 @@ def main():
                         "damage greater than zero and the share with P90 damage greater than zero. "
                         "The **WFP Basement chart** shows, among buildings that experience any "
                         "damage, the share for which wet-floodproofing the basement brings P90 "
-                        "damage to ≤ $1k. The **Elevation chart** shows the share for which "
-                        "elevation alone brings P90 damage to ≤ $1k — the direct, strict rule, "
-                        "which matches the Map tab's least-invasive classifier "
+                        "damage to ≤ $1k. The **Elevation chart** shows, among damaged buildings "
+                        "where WFP Basement is **not** sufficient on its own, the share for which "
+                        "elevation strictly outperforms WFP Basement on P90 — i.e. elevation "
+                        "provides meaningful additional protection beyond what basement "
+                        "floodproofing achieves. This dominance rule matches the Map tab's "
+                        "Adaptation Effectiveness classifier "
                         "(No Damage → WFP Basement → Elevation → Residual)."
                     )
                 
@@ -3411,14 +3425,12 @@ def main():
                                        xaxis_title="Year", height=400)
                 fig_line.update_yaxes(tickmode='array', tickvals=l_ticks, ticktext=l_labels)
                 # Custom x-axis ticks so the 2025 baseline reads as
-                # 'Potential' (the bundle's display label) — matches the
-                # sidebar selector. Other years tick as plain integers.
+                # All x-axis ticks render as plain integer years. The bundle
+                # ships a 'Potential' label for the 2025 baseline, but the
+                # accompanying "Today" annotation already conveys that —
+                # showing the plain year is less ambiguous.
                 _xs = sorted(df_timeline['TargetYear'].unique())
-                _x_labels = [
-                    target_year_labels.get(int(y), str(int(y))) if str(target_year_labels.get(int(y), str(int(y)))) != str(int(y))
-                    else str(int(y))
-                    for y in _xs
-                ]
+                _x_labels = [str(int(y)) for y in _xs]
                 fig_line.update_xaxes(tickmode='array', tickvals=_xs, ticktext=_x_labels)
                 # When a 'Potential' point is present, drop a faint vertical
                 # line + annotation so users see it's the *today* baseline,
@@ -3766,7 +3778,9 @@ def main():
                             p_ffe = float((arr >= ffe_val).sum()) / n
                             p_bfe = (float((arr >= bfe_local).sum()) / n
                                      if bfe_local is not None else float('nan'))
-                            label = target_year_labels.get(int(yr), str(int(yr)))
+                            # Plain integer year; the 2025 baseline used to
+                            # render as 'Potential' but a bare year is clearer.
+                            label = str(int(yr))
                             exp_rows.append({
                                 'SLR Scenario':         slr_label,
                                 'Year':                 label,
@@ -3844,13 +3858,11 @@ def main():
                         arr = yr_mc[mc_cols_fd].to_numpy(dtype=float).flatten()
                         if arr.size == 0:
                             continue
-                        # Build a "Year" cell that uses the bundle label when
-                        # one exists (so 2025 reads "Potential (2025)") and
-                        # falls back to the bare year otherwise.
+                        # Plain integer year for the row label. The bundle
+                        # ships a 'Potential' label for the 2025 baseline,
+                        # but the bare year is less ambiguous to readers.
                         yr_int = int(yr)
-                        yr_lbl = target_year_labels.get(yr_int, str(yr_int))
-                        year_display = (f"{yr_lbl} ({yr_int})"
-                                        if yr_lbl != str(yr_int) else str(yr_int))
+                        year_display = str(yr_int)
                         row = {'Year': year_display}
                         for col_label, pct in pct_specs:
                             wl = float(np.percentile(arr, pct))
@@ -3945,10 +3957,9 @@ def main():
                         margin=dict(l=60, r=20, t=70, b=50),
                     )
                     _bd_xs = sorted(df_traj['TargetYear'].unique())
-                    _bd_x_labels = [
-                        target_year_labels.get(int(y), str(int(y)))
-                        for y in _bd_xs
-                    ]
+                    # Plain integer years; the 2025 baseline used to render
+                    # as "Potential" but a bare year is less ambiguous.
+                    _bd_x_labels = [str(int(y)) for y in _bd_xs]
                     fig_building.update_xaxes(
                         showgrid=True, gridcolor='#e5e7eb',
                         tickmode='array', tickvals=_bd_xs, ticktext=_bd_x_labels,
