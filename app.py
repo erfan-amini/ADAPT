@@ -3425,32 +3425,10 @@ def main():
                                        xaxis_title="Year", height=400)
                 fig_line.update_yaxes(tickmode='array', tickvals=l_ticks, ticktext=l_labels)
                 # Custom x-axis ticks so the 2025 baseline reads as
-                # All x-axis ticks render as plain integer years. The bundle
-                # ships a 'Potential' label for the 2025 baseline, but the
-                # accompanying "Today" annotation already conveys that —
-                # showing the plain year is less ambiguous.
+                # All x-axis ticks render as plain integer years.
                 _xs = sorted(df_timeline['TargetYear'].unique())
                 _x_labels = [str(int(y)) for y in _xs]
                 fig_line.update_xaxes(tickmode='array', tickvals=_xs, ticktext=_x_labels)
-                # When a 'Potential' point is present, drop a faint vertical
-                # line + annotation so users see it's the *today* baseline,
-                # not just an early year on a smooth ramp.
-                potential_year = next(
-                    (int(y) for y, lab in target_year_labels.items() if lab == 'Potential'),
-                    None,
-                )
-                if potential_year is not None and potential_year in _xs:
-                    fig_line.add_vline(
-                        x=potential_year, line_width=1, line_dash='dot',
-                        line_color='#94a3b8',
-                    )
-                    fig_line.add_annotation(
-                        x=potential_year, y=1, yref='paper',
-                        text="Today", showarrow=False,
-                        xanchor='left', yanchor='top',
-                        font=dict(size=10, color='#64748b'),
-                        xshift=4, yshift=-2,
-                    )
                 st.plotly_chart(fig_line, use_container_width=True)
             
             # ----------------------------------------------------------------
