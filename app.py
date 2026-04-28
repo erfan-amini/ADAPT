@@ -489,6 +489,67 @@ def load_bundle(data_folder, location_slug):
     bldg_dmg = bldg_dmg.drop(columns=[p for p in pct_present if p not in pct_keep])
     bldg_dmg = bldg_dmg.rename(columns={p: f'CumEAD_{p}' for p in pct_keep})
 
+    # ---- Defensive correction for MATLAB Elevate no-op artifact ----
+    # The MATLAB damage generator (AAA___Main_v9.m) skips the elevation math
+    # for buildings tagged `Floodplain_Status == "Out of floodplain"` and just
+    # sets `Dmg(:,:,4,si) = dmg_baseline` — i.e. Elevate equals No mitigation
+    # exactly, by construction. The Floodplain_Status flag is itself derived
+    # from the building's first-floor elevation (FFE) being above the design
+    # flood elevation (DFE = BFE + 2 ft), but FFE = ground + foundation height,
+    # so a building can sit on low ground (yard/garage flood frequently) and
+    # still be tagged Out-of-floodplain because its raised foundation lifts
+    # the FFE above the DFE. The combined effect: a non-trivial number of
+    # OOF buildings have substantial baseline damage AND a no-op'd Elevate
+    # column, which makes them look like "Residual: even elevation can't help"
+    # on the Adaptation Effectiveness map — when in reality elevation simply
+    # wasn't computed for them. We detect the no-op (Elevate exactly equals
+    # No-mitigation across every percentile column for a given (building,
+    # year, SLR)) and replace the affected Elevate row's percentile values
+    # with NaN. Downstream code already handles NaN as "retrofit not
+    # available" rather than "elevation is fully ineffective", so the map
+    # and the Distributions plots stop labeling these buildings Residual on
+    # spurious grounds.
+    pct_cols_in_bldg = [c for c in bldg_dmg.columns if c.startswith('CumEAD_P')]
+    if 'Action' in bldg_dmg.columns and pct_cols_in_bldg:
+        # Build a No-mitigation lookup by (id, TargetYear, SLR)
+        nm_lookup = (bldg_dmg[bldg_dmg['Action'] == 'No mitigation']
+                     [['id', 'TargetYear', 'SLR'] + pct_cols_in_bldg]
+                     .rename(columns={c: f'_NM_{c}' for c in pct_cols_in_bldg}))
+        bldg_dmg = bldg_dmg.merge(nm_lookup, on=['id', 'TargetYear', 'SLR'],
+                                  how='left')
+        # Compare Elevate row by row against its No-Mit twin. We use exact
+        # equality across ALL percentile columns simultaneously — anything
+        # else is an actual elevation calculation, even if it happens to be
+        # numerically close to baseline. exact-match catches the no-op.
+        is_elev = bldg_dmg['Action'] == 'Elevate'
+        is_noop = is_elev.copy()
+        for c in pct_cols_in_bldg:
+            nm_col = f'_NM_{c}'
+            # Treat both NaN as no-evidence-of-difference (don't trip noop on missing)
+            same = (bldg_dmg[c] == bldg_dmg[nm_col]) | \
+                   (bldg_dmg[c].isna() & bldg_dmg[nm_col].isna())
+            is_noop &= same
+        # Also require at least one column to be non-zero — a real
+        # all-zeros Elevate row (no damage to begin with) shouldn't be
+        # flagged as no-op.
+        any_nonzero = pd.Series(False, index=bldg_dmg.index)
+        for c in pct_cols_in_bldg:
+            any_nonzero |= bldg_dmg[c].fillna(0) > 0
+        is_noop &= any_nonzero
+        n_noop = int(is_noop.sum())
+        if n_noop > 0:
+            # Replace the percentile values on no-op'd Elevate rows with NaN
+            for c in pct_cols_in_bldg:
+                bldg_dmg.loc[is_noop, c] = np.nan
+            # Stash the count on the entry so we can surface it in the UI
+            _matlab_noop_count = n_noop
+        else:
+            _matlab_noop_count = 0
+        # Drop the temporary lookup columns
+        bldg_dmg = bldg_dmg.drop(columns=[f'_NM_{c}' for c in pct_cols_in_bldg])
+    else:
+        _matlab_noop_count = 0
+
     # Merge attrs onto every (id, year, action, slr) row so each row carries
     # the descriptive context the Map / Details / Distributions tabs need.
     df_buildings = bldg_dmg.merge(bldg_attrs, on='id', how='left')
@@ -618,6 +679,7 @@ def load_bundle(data_folder, location_slug):
         'target_year_labels': target_year_labels,
         'format':             'bundle',
         'location_slug':      location_slug,
+        'matlab_elev_noop_rows': _matlab_noop_count,
     }
 
 
@@ -2425,15 +2487,24 @@ def main():
                                 1: n_no_damage,
                                 2: n_wfpb_works,
                                 3: n_elev_works,
-                                4: n_residual,
                             }
                             
-                            # Workshop palette (RGB normalized)
+                            # Workshop palette (RGB normalized).
+                            # Residual Damage (cat 4) is intentionally OMITTED
+                            # from the visible categories: in the current data
+                            # generator, a "Residual" classification primarily
+                            # reflects the MATLAB no-op convention for Above-DFE
+                            # buildings (where Elevate is set to baseline) rather
+                            # than a physical conclusion that no retrofit can
+                            # save the building. Coloring those red was reading
+                            # as "doomed coastal property" when really it was
+                            # "data generator skipped the elevation math here."
+                            # Buildings classified as Residual are simply not
+                            # plotted on this view.
                             cat_specs = [
                                 (1, 'No Damage',        '#22c55e'),  # green
                                 (2, 'WFP Basement',     '#facc15'),  # yellow
                                 (3, 'Elevation',        '#f97316'),  # orange
-                                (4, 'Residual Damage',  '#dc2626'),  # red
                             ]
                             
                             for ci, label, color in cat_specs:
@@ -2712,11 +2783,9 @@ def main():
                             "the cheapest fix that eliminates damage) → "
                             "**Elevation** (WFP Basement isn't sufficient, but elevation "
                             "strictly outperforms WFP Basement on P90 — elevation provides "
-                            "meaningful additional protection) → "
-                            "**Residual Damage** (neither retrofit beats the other — "
-                            "consider buyout or other non-retrofit options). "
+                            "meaningful additional protection). "
                             "Each building appears in exactly one color, and the legend counts "
-                            "partition the total — they don't overlap. Non-residential buildings are "
+                            "partition the buildings shown. Non-residential buildings are "
                             "marked with a black ring."
                         )
                     elif map_view == "Damage Bins":
@@ -3424,11 +3493,20 @@ def main():
                 fig_line.update_layout(yaxis_title="Cumulative Damage",
                                        xaxis_title="Year", height=400)
                 fig_line.update_yaxes(tickmode='array', tickvals=l_ticks, ticktext=l_labels)
-                # Custom x-axis ticks so the 2025 baseline reads as
                 # All x-axis ticks render as plain integer years.
                 _xs = sorted(df_timeline['TargetYear'].unique())
                 _x_labels = [str(int(y)) for y in _xs]
-                fig_line.update_xaxes(tickmode='array', tickvals=_xs, ticktext=_x_labels)
+                # Constrain the x-range to the actual data span (with a small
+                # symmetric pad so markers don't sit on the axes). Without
+                # this, Plotly's auto-range extends back ~5 years from the
+                # first point, suggesting we have data we don't.
+                if _xs:
+                    _xpad = max(1.0, 0.04 * (max(_xs) - min(_xs)))
+                    _xrange = [min(_xs) - _xpad, max(_xs) + _xpad]
+                else:
+                    _xrange = None
+                fig_line.update_xaxes(tickmode='array', tickvals=_xs, ticktext=_x_labels,
+                                      range=_xrange)
                 st.plotly_chart(fig_line, use_container_width=True)
             
             # ----------------------------------------------------------------
@@ -3935,12 +4013,18 @@ def main():
                         margin=dict(l=60, r=20, t=70, b=50),
                     )
                     _bd_xs = sorted(df_traj['TargetYear'].unique())
-                    # Plain integer years; the 2025 baseline used to render
-                    # as "Potential" but a bare year is less ambiguous.
                     _bd_x_labels = [str(int(y)) for y in _bd_xs]
+                    # Constrain x-range to actual data span with a small pad
+                    # (otherwise Plotly auto-extends back several years).
+                    if _bd_xs:
+                        _bd_xpad = max(1.0, 0.04 * (max(_bd_xs) - min(_bd_xs)))
+                        _bd_xrange = [min(_bd_xs) - _bd_xpad, max(_bd_xs) + _bd_xpad]
+                    else:
+                        _bd_xrange = None
                     fig_building.update_xaxes(
                         showgrid=True, gridcolor='#e5e7eb',
                         tickmode='array', tickvals=_bd_xs, ticktext=_bd_x_labels,
+                        range=_bd_xrange,
                         showline=True, linecolor='#cbd5e1')
                     fig_building.update_yaxes(
                         showgrid=True, gridcolor='#e5e7eb',
@@ -4314,6 +4398,21 @@ def main():
                 c_ticks, c_labels = smart_money_ticks(_c_max, target_n=6)
                 fig_comp.update_layout(height=450, yaxis_title="Cumulative Damage", xaxis_title="Year")
                 fig_comp.update_yaxes(tickmode='array', tickvals=c_ticks, ticktext=c_labels)
+                # Constrain x-axis to actual data span (otherwise Plotly's
+                # auto-range pads backward, suggesting data we don't have).
+                _comp_xs = sorted(df_comparison['TargetYear'].unique())
+                if _comp_xs:
+                    _comp_xpad = max(1.0, 0.04 * (max(_comp_xs) - min(_comp_xs)))
+                    _comp_xrange = [min(_comp_xs) - _comp_xpad,
+                                    max(_comp_xs) + _comp_xpad]
+                else:
+                    _comp_xrange = None
+                fig_comp.update_xaxes(
+                    tickmode='array',
+                    tickvals=_comp_xs,
+                    ticktext=[str(int(y)) for y in _comp_xs],
+                    range=_comp_xrange,
+                )
                 st.plotly_chart(fig_comp, use_container_width=True)
 
             # ================================================================
@@ -4399,14 +4498,24 @@ def main():
                                 xanchor='right', x=1, bgcolor='rgba(255,255,255,0.85)'),
                 )
                 _trend_xs = sorted(df_slr['TargetYear'].unique())
-                _trend_x_labels = [
-                    target_year_labels.get(int(y), str(int(y)))
-                    for y in _trend_xs
-                ]
+                # Plain integer-year ticks (no 'Potential' / 2025 anchor).
+                _trend_x_labels = [str(int(y)) for y in _trend_xs]
+                # Tight x-range with a small symmetric padding so the first
+                # data marker doesn't sit on the y-axis. Without an explicit
+                # range, Plotly auto-extends to ~2020 (or further), which
+                # made it look like the data started in some baseline year
+                # we never actually computed.
+                if _trend_xs:
+                    _trend_xpad = max(1.0, 0.04 * (max(_trend_xs) - min(_trend_xs)))
+                    _trend_xrange = [min(_trend_xs) - _trend_xpad,
+                                     max(_trend_xs) + _trend_xpad]
+                else:
+                    _trend_xrange = None
                 fig_trend.update_xaxes(
                     title="Year", showgrid=True, gridcolor='#e5e7eb',
                     showline=True, linecolor='#cbd5e1',
                     tickmode='array', tickvals=_trend_xs, ticktext=_trend_x_labels,
+                    range=_trend_xrange,
                 )
                 fig_trend.update_yaxes(
                     title="Cumulative Damage", showgrid=True, gridcolor='#e5e7eb',
