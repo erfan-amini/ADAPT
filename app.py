@@ -1378,6 +1378,37 @@ def build_box_whisker_panel(group_labels, scenario_data, panel_title="",
                 '<extra></extra>'
             ),
         ))
+        
+        # Overlay an explicit "$0" marker for any box that collapses to zero
+        # across all five summary stats. Plotly draws nothing visible when
+        # q1=q3=median=lower=upper=0, which makes a true-zero strategy look
+        # missing — but the message we want is "this strategy reduces damage
+        # to zero," not "no data." The overlay is a small filled diamond
+        # placed right at zero, in the same line color as the box, with a
+        # hover that confirms the zero reading.
+        zero_x, zero_labels = [], []
+        for xc, p05_v, q1_v, p50_v, q3_v, p95_v, lab in zip(
+            x_num, p05_arr, q1_arr, p50_arr, q3_arr, p95_arr, x_hover_labels
+        ):
+            if all(abs(v) < label_zero_thresh for v in (p05_v, q1_v, p50_v, q3_v, p95_v)):
+                zero_x.append(xc)
+                zero_labels.append(lab)
+        if zero_x:
+            fig.add_trace(go.Scatter(
+                x=zero_x, y=[0.0] * len(zero_x),
+                mode='markers',
+                marker=dict(symbol='diamond', size=10,
+                            color=line_clr,
+                            line=dict(color='white', width=1.2)),
+                customdata=zero_labels,
+                hovertemplate=(
+                    f'<b>{slr_label}</b><br>'
+                    '%{customdata}<br>'
+                    'All percentiles ≈ $0'
+                    '<extra></extra>'
+                ),
+                showlegend=False,
+            ))
 
     # Y-axis range with headroom for whisker labels
     y_span = max(abs(y_max_whisker), abs(y_min))
@@ -1792,6 +1823,26 @@ def main():
                     'Elevate':         'Elevate',
                 }
                 actions_present = [a for a in action_order if a in df_b_year['Action'].unique()]
+                
+                # When the user has restricted the view to ONLY Above-DFE
+                # buildings (Floodplain_Status == 'Out of floodplain'), drop
+                # Elevate from every Distributions chart on this tab. The
+                # data generator treats Elevate as a no-op for those buildings
+                # (Elevate damage = baseline damage by construction), so an
+                # Elevate box would just mirror the No-Mitigation box and
+                # mislead readers into thinking elevation does nothing.
+                # The opposite case (only Under-DFE selected) keeps Elevate.
+                only_above_dfe = (
+                    dfe_filter
+                    and len(dfe_filter) == 1
+                    and 'Floodplain_Status' in df_b_year.columns
+                    and {str(v).strip().lower() for v in dfe_filter} <= {
+                        'out of floodplain', 'out_of_floodplain', 'above dfe'
+                    }
+                )
+                if only_above_dfe and 'Elevate' in actions_present:
+                    actions_present = [a for a in actions_present if a != 'Elevate']
+                
                 thr = ZERO_THRESH_DISPLAY
                 
                 # =============================================================
@@ -2110,11 +2161,21 @@ def main():
                         single_group=True,
                     )
                     
-                    col_p4, col_p5 = st.columns(2)
-                    with col_p4:
-                        st.plotly_chart(fig4, use_container_width=True)
-                    with col_p5:
-                        st.plotly_chart(fig5, use_container_width=True)
+                    # When only Above-DFE buildings are selected, Elevate is
+                    # a no-op in the data generator (Elevate damage = baseline
+                    # by construction), so the "Elevation outperforms WFP B"
+                    # chart would be 0 by definition and the corresponding
+                    # column in the summary table would mislead. Hide both.
+                    if only_above_dfe:
+                        col_p4, = st.columns(1)
+                        with col_p4:
+                            st.plotly_chart(fig4, use_container_width=True)
+                    else:
+                        col_p4, col_p5 = st.columns(2)
+                        with col_p4:
+                            st.plotly_chart(fig4, use_container_width=True)
+                        with col_p5:
+                            st.plotly_chart(fig5, use_container_width=True)
                     
                     # Per-scenario summary table
                     tbl_rows = []
@@ -2123,14 +2184,18 @@ def main():
                             continue
                         s = valid_stats[slr_key]
                         nd = s['n_damaged']
-                        tbl_rows.append({
+                        row = {
                             'SLR Scenario':              s['label'],
                             'Buildings':                 f"{s['n_tot']:,}",
                             'Damaged (P90 > $0)':        f"{s['n_sev_dmg']:,}  ({100*s['n_sev_dmg']/s['n_tot']:.1f}%)" if s['n_tot'] else "—",
                             'Damaged (median > $0)':     f"{s['n_p50_dmg']:,}  ({100*s['n_p50_dmg']/s['n_tot']:.1f}%)" if s['n_tot'] else "—",
                             'WFP Basement eliminates P90':       f"{s['n_wfpb']:,}  ({100*s['n_wfpb']/nd:.1f}%)" if nd > 0 else "—",
-                            'Elevation > WFP B (where WFP B fails)': f"{s['n_elev']:,}  ({100*s['n_elev']/nd:.1f}%)" if nd > 0 else "—",
-                        })
+                        }
+                        if not only_above_dfe:
+                            row['Elevation > WFP B (where WFP B fails)'] = (
+                                f"{s['n_elev']:,}  ({100*s['n_elev']/nd:.1f}%)" if nd > 0 else "—"
+                            )
+                        tbl_rows.append(row)
                     if tbl_rows:
                         st.markdown("**Per-scenario summary**")
                         st.dataframe(pd.DataFrame(tbl_rows),
