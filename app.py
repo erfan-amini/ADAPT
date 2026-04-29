@@ -1561,6 +1561,20 @@ def main():
             df_buildings_raw = loc_entry.get('buildings')
 
         df_buildings = filter_by_occupancy(df_buildings_raw, selected_occupancy)
+        
+        # Drop the 2025 ("baseline") year from every downstream dataframe.
+        # The bundle ships it as a 'Potential' label so users can see today's
+        # damage in tables, but for this tool the relevant story is the
+        # SLR-driven escalation across 2040 / 2055 / 2100 — surfacing 2025
+        # adds a column/row that doesn't belong in any of the comparative
+        # views and creates noise (e.g. damage trajectories anchored at the
+        # baseline). Drop it ONCE here so every tab inherits the cleaner
+        # year set automatically.
+        BASELINE_YEAR_TO_DROP = 2025
+        if df_buildings is not None and 'TargetYear' in df_buildings.columns:
+            df_buildings = df_buildings[df_buildings['TargetYear'] != BASELINE_YEAR_TO_DROP].copy()
+        if df_agg_raw is not None and 'TargetYear' in df_agg_raw.columns:
+            df_agg_raw = df_agg_raw[df_agg_raw['TargetYear'] != BASELINE_YEAR_TO_DROP].copy()
 
         # When a new-format workbook is loaded we have a pre-computed,
         # MC-correct aggregate per occupancy bucket — pick the one that
@@ -1569,6 +1583,12 @@ def main():
         preloaded_agg = None
         if loc_entry is not None and loc_entry.get('agg_by_occ'):
             preloaded_agg = loc_entry['agg_by_occ'].get(selected_occupancy)
+            # Same baseline-year drop as above so the agg-driven Summary /
+            # Trends / DFE-comparison panels don't include 2025 either.
+            if preloaded_agg is not None and 'TargetYear' in preloaded_agg.columns:
+                preloaded_agg = preloaded_agg[
+                    preloaded_agg['TargetYear'] != BASELINE_YEAR_TO_DROP
+                ].copy()
         
         st.divider()
         st.header("🎛️ Scenario Filters")
@@ -1744,6 +1764,15 @@ def main():
             st.warning("No per-building data available for this location.")
         else:
             df_b_year = df_buildings[df_buildings['TargetYear'] == target_year].copy()
+            
+            # Honor the sidebar DFE filter here too. Previously this tab
+            # always ran on the full inventory regardless of the sidebar
+            # selection, which made the per-building distribution panels
+            # look insensitive to a control that visibly drives the Map.
+            # The filter is in scope because the sidebar is rendered before
+            # the tabs.
+            if dfe_filter and 'Floodplain_Status' in df_b_year.columns:
+                df_b_year = df_b_year[df_b_year['Floodplain_Status'].isin(dfe_filter)]
             
             if df_b_year.empty:
                 st.warning(f"No per-building data for year {target_year}.")
