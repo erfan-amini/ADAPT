@@ -2280,7 +2280,7 @@ def main():
             #     re-render the TTL check runs again — so the ring
             #     disappears on its own without any explicit timer.
             HIGHLIGHT_TTL_SEC = 8.0
-            search_col1, search_col2, search_col3 = st.columns([3, 1, 6])
+            search_col1, search_col2, search_col3 = st.columns([3, 2, 5])
             with search_col1:
                 search_id_text = st.text_input(
                     "Find building by ID",
@@ -2296,12 +2296,17 @@ def main():
                     ),
                 )
             with search_col2:
-                # Stack two small buttons vertically so they line up with
-                # the text input's baseline (Streamlit puts label space
-                # above the input, so a single label-less button doesn't
-                # align cleanly).
-                find_clicked  = st.button("🔍 Find",  key="map_search_find",  use_container_width=True)
-                clear_clicked = st.button("✖ Clear",  key="map_search_clear", use_container_width=True)
+                # Spacer above the buttons so they vertically line up with
+                # the text input baseline (Streamlit reserves label space
+                # above the input). One markdown line ≈ the label height.
+                st.markdown("<div style='height:1.85em'></div>", unsafe_allow_html=True)
+                btn_a, btn_b = st.columns(2)
+                with btn_a:
+                    find_clicked = st.button("🔍 Find", key="map_search_find",
+                                             use_container_width=True)
+                with btn_b:
+                    clear_clicked = st.button("✖ Clear", key="map_search_clear",
+                                              use_container_width=True)
             with search_col3:
                 # Spacer column; deliberately empty.
                 pass
