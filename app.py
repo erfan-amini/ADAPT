@@ -2261,6 +2261,110 @@ def main():
                 ),
             )
             
+            # ----------------------------------------------------------
+            # Building-ID search — drops a temporary highlight ring on
+            # the map. The ring is plotted from the same figure as the
+            # rest of the markers (so it survives pan/zoom and exports
+            # correctly), but it auto-expires after a few seconds so the
+            # user can take a clean screenshot without manually undoing
+            # anything. Implementation:
+            #   * The search input writes (building_id, timestamp) to
+            #     session state.
+            #   * Each time the map renders, we check whether the
+            #     timestamp is still "fresh" (within HIGHLIGHT_TTL_SEC).
+            #     If it is, we add the ring trace; if it isn't, we don't.
+            #   * A small "Clear" button next to the input lets the user
+            #     dismiss the ring instantly without waiting for the TTL.
+            #   * Streamlit re-renders any time the user interacts with
+            #     the page (zoom, pan, scroll, etc.), and on each
+            #     re-render the TTL check runs again — so the ring
+            #     disappears on its own without any explicit timer.
+            HIGHLIGHT_TTL_SEC = 8.0
+            search_col1, search_col2, search_col3 = st.columns([3, 1, 6])
+            with search_col1:
+                search_id_text = st.text_input(
+                    "Find building by ID",
+                    value="",
+                    key="map_search_bldg_id",
+                    placeholder="e.g. 8466717",
+                    help=(
+                        "Enter a Building ID and press Enter (or click 🔍). "
+                        f"A magenta ring will flash on that building for "
+                        f"~{int(HIGHLIGHT_TTL_SEC)} seconds, then disappear "
+                        "automatically — no extra marks left on the map for "
+                        "screenshots. Click ✖ to clear immediately."
+                    ),
+                )
+            with search_col2:
+                # Stack two small buttons vertically so they line up with
+                # the text input's baseline (Streamlit puts label space
+                # above the input, so a single label-less button doesn't
+                # align cleanly).
+                find_clicked  = st.button("🔍 Find",  key="map_search_find",  use_container_width=True)
+                clear_clicked = st.button("✖ Clear",  key="map_search_clear", use_container_width=True)
+            with search_col3:
+                # Spacer column; deliberately empty.
+                pass
+            
+            # Resolve the click → session-state interaction
+            import time as _time_mod
+            if 'map_highlight_id' not in st.session_state:
+                st.session_state['map_highlight_id']    = None
+                st.session_state['map_highlight_until'] = 0.0
+                st.session_state['map_highlight_msg']   = None
+            
+            if clear_clicked:
+                st.session_state['map_highlight_id']    = None
+                st.session_state['map_highlight_until'] = 0.0
+                st.session_state['map_highlight_msg']   = None
+            elif find_clicked and search_id_text.strip():
+                # Try to coerce the user's input to the same dtype as the
+                # 'id' column. The bundle stores ids as ints, but a user
+                # might paste them with whitespace, leading zeros, or a
+                # stray decimal point — be forgiving.
+                raw = search_id_text.strip()
+                try:
+                    bid_target = int(float(raw))
+                except (TypeError, ValueError):
+                    bid_target = None
+                
+                if bid_target is None:
+                    st.session_state['map_highlight_msg'] = (
+                        'warning', f"'{raw}' isn't a valid building ID."
+                    )
+                    st.session_state['map_highlight_id']    = None
+                    st.session_state['map_highlight_until'] = 0.0
+                else:
+                    found_row = df_buildings[df_buildings['id'] == bid_target]
+                    if found_row.empty:
+                        st.session_state['map_highlight_msg'] = (
+                            'warning',
+                            f"Building #{bid_target} isn't in the current "
+                            f"selection. Try clearing the DFE / occupancy "
+                            f"filters or check the ID."
+                        )
+                        st.session_state['map_highlight_id']    = None
+                        st.session_state['map_highlight_until'] = 0.0
+                    else:
+                        st.session_state['map_highlight_id']    = bid_target
+                        st.session_state['map_highlight_until'] = (
+                            _time_mod.time() + HIGHLIGHT_TTL_SEC
+                        )
+                        st.session_state['map_highlight_msg'] = (
+                            'success',
+                            f"Highlighting #{bid_target} for "
+                            f"~{int(HIGHLIGHT_TTL_SEC)}s."
+                        )
+            
+            # Surface any feedback message from the resolution above.
+            _hl_msg = st.session_state.get('map_highlight_msg')
+            if _hl_msg:
+                _kind, _text = _hl_msg
+                if _kind == 'warning':
+                    st.warning(_text, icon='⚠️')
+                elif _kind == 'success':
+                    st.caption(f"✓ {_text}")
+            
             df_map = prepare_map_data(df_buildings, target_year, scenario)
             
             if df_map is None or len(df_map) == 0:
@@ -2760,6 +2864,73 @@ def main():
                                     name='Non-Residential (ringed)',
                                     showlegend=True, hoverinfo='skip',
                                 ))
+                    
+                    # ---- Search highlight (auto-expires) ----
+                    # If the user just searched for a Building ID and the
+                    # highlight is still fresh, drop a magenta ring on top
+                    # of all other traces. Two layered markers give a clear
+                    # visual flag: an outer translucent halo + an inner
+                    # solid ring. Both vanish on the next rerun once the
+                    # TTL has elapsed.
+                    #
+                    # Streamlit doesn't rerun on a wall-clock timer, so we
+                    # schedule a one-shot rerun right after the TTL using
+                    # st_autorefresh — without it, the ring would persist
+                    # on screen until the user moved the mouse / resized
+                    # the page, which defeats the "clean screenshot"
+                    # goal.
+                    _hl_id    = st.session_state.get('map_highlight_id')
+                    _hl_until = float(st.session_state.get('map_highlight_until', 0.0))
+                    _hl_remaining = _hl_until - _time_mod.time()
+                    if _hl_id is not None and _hl_remaining > 0:
+                        # Look up the building's coordinates in the same
+                        # df_map the rest of the figure was built from, so
+                        # the ring lands on the same dot the user sees.
+                        _hl_row = df_map[df_map['id'] == _hl_id]
+                        if not _hl_row.empty:
+                            _hl_lat = float(_hl_row['latitude'].iloc[0])
+                            _hl_lon = float(_hl_row['longitude'].iloc[0])
+                            _addr = _hl_row.get('address', pd.Series([None])).iloc[0]
+                            _hl_label = (
+                                f"Building #{_hl_id}"
+                                + (f" — {_addr}" if pd.notna(_addr) and str(_addr).strip() else "")
+                            )
+                            # Outer halo — large translucent magenta circle
+                            fig_map.add_trace(go.Scattermapbox(
+                                lat=[_hl_lat], lon=[_hl_lon],
+                                mode='markers',
+                                marker=dict(size=44, color='rgba(217, 70, 239, 0.32)'),
+                                hoverinfo='skip',
+                                showlegend=False,
+                                name='_search_halo',
+                            ))
+                            # Inner solid ring
+                            fig_map.add_trace(go.Scattermapbox(
+                                lat=[_hl_lat], lon=[_hl_lon],
+                                mode='markers',
+                                marker=dict(size=22, color='rgba(217, 70, 239, 0.95)'),
+                                hovertemplate=f'<b>{_hl_label}</b><extra></extra>',
+                                showlegend=True,
+                                name=f'🔍 {_hl_label}',
+                            ))
+                            # Schedule a single rerun ~200ms after the TTL
+                            # so the ring auto-disappears without manual
+                            # interaction. Falls back gracefully if the
+                            # st_autorefresh package isn't installed —
+                            # the ring still vanishes on the next user
+                            # interaction (pan, zoom, click, etc.).
+                            try:
+                                from streamlit_autorefresh import st_autorefresh
+                                st_autorefresh(
+                                    interval=int(_hl_remaining * 1000) + 200,
+                                    limit=1,
+                                    key=f"map_hl_expire_{_hl_id}_{int(_hl_until)}",
+                                )
+                            except ImportError:
+                                # Optional dependency — silently skip the
+                                # auto-clear. The user can hit "✖ Clear"
+                                # or trigger any UI event to clear it.
+                                pass
                     
                     # ---- Common layout ----
                     fig_map.update_layout(
