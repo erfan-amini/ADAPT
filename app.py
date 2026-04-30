@@ -1712,6 +1712,72 @@ def main():
                 bfe_ft = loc_entry.get('bfe_ft')
                 if bfe_ft is not None:
                     st.caption(f"BFE: **{bfe_ft:g} ft NAVD88** (DFE = BFE+2)")
+        
+        # ====================================================================
+        # 🖥️ Display
+        # --------------------------------------------------------------------
+        # Layout density toggle. Browsers don't expose a programmatic zoom
+        # API for security/accessibility reasons, so an in-app "set my
+        # zoom to 90%" isn't possible. The next-best thing is a CSS
+        # `transform: scale(0.9)` applied to the main content area —
+        # visually equivalent for most users, and the toggle leaves it
+        # off by default so anyone with a small screen / large fonts
+        # isn't surprised by an unrequested rescale.
+        # ====================================================================
+        st.divider()
+        st.subheader("🖥️ Display")
+        layout_density = st.radio(
+            "Layout density",
+            options=["Default", "Compact (90%)"],
+            index=0,
+            horizontal=True,
+            key="layout_density",
+            help=(
+                "**Default** — content renders at the browser's actual size. "
+                "**Compact** — visually shrinks the main page to ~90% via "
+                "CSS scale, fitting more on screen. Equivalent to pressing "
+                "Ctrl+– once in the browser, but only affects this app and "
+                "leaves your global browser zoom alone. Note: hover hit-"
+                "targets on the map may be slightly misaligned in Compact "
+                "mode (Plotly computes them in unscaled pixel space)."
+            ),
+        )
+    
+    # ========================================================================
+    # GLOBAL CSS — sidebar narrowing (always on) + optional compact density
+    # ========================================================================
+    # The sidebar narrowing is purely a layout fix: Streamlit's default
+    # sidebar width (~336 px on desktop, ~21rem) eats into the main column
+    # more than this dashboard needs. Pinning min/max keeps the controls
+    # readable while reclaiming horizontal real estate for the maps and
+    # box plots.
+    #
+    # The compact-mode rule scales the main content area to 90% and then
+    # widens it by 1/0.9 to recover the visual width the scale would have
+    # stolen. Anchoring to `top center` keeps content where the user
+    # expects it. Applied only when the sidebar toggle is set to
+    # "Compact (90%)".
+    _css_blocks = [
+        # Always-on: narrower sidebar
+        """
+        section[data-testid="stSidebar"] {
+            min-width: 280px !important;
+            max-width: 280px !important;
+        }
+        """
+    ]
+    if layout_density == "Compact (90%)":
+        _css_blocks.append("""
+        .main .block-container {
+            transform: scale(0.9);
+            transform-origin: top center;
+            width: 111.11%;
+        }
+        """)
+    st.markdown(
+        "<style>\n" + "\n".join(_css_blocks) + "\n</style>",
+        unsafe_allow_html=True,
+    )
     
     # ========================================================================
     # PAGE TITLE — centered, bold, above the tabs
