@@ -1954,15 +1954,19 @@ def main():
                         each 'group' is a strategy and the box summarizes the
                         distribution of `stat_col` across damaged buildings.
 
-                        Returns 5-tuples ``(p10, p25, p50, p75, p90)`` per
-                        group: whiskers reach to the 10th/90th percentiles of
-                        damage across buildings (per the Distributions-tab
-                        range convention), and box edges sit at the 25th/75th
-                        percentiles of the same distribution. Computing P25
-                        and P75 directly from the building values means the
-                        box edges are real quartiles of the cross-building
-                        distribution rather than CDF-linear approximations
-                        between P10 and P90.
+                        Returns 5-tuples ``(p05, p25, p50, p75, p95)`` per
+                        group: whiskers reach to the 5th/95th percentiles of
+                        damage across buildings, and box edges sit at the
+                        25th/75th percentiles of the same distribution.
+                        Computing P25 and P75 directly from the building
+                        values means the box edges are real quartiles of the
+                        cross-building distribution rather than CDF-linear
+                        approximations between P05 and P95. The wider
+                        5th/95th window (vs the earlier 10th/90th) surfaces
+                        residual damage on Elevate that a tighter window
+                        would clip out — many buildings only see non-zero
+                        post-elevation damage in the upper tail of the
+                        cross-building spread.
                         """
                         out = {slr_key: [] for slr_key, *_ in SCENARIO_SPECS}
                         for action in actions_present:
@@ -1972,16 +1976,16 @@ def main():
                                 if len(vals) == 0:
                                     out[slr_key].append(None)
                                     continue
-                                p10 = float(np.percentile(vals, 10))
+                                p05 = float(np.percentile(vals, 5))
                                 p25 = float(np.percentile(vals, 25))
                                 p50 = float(np.percentile(vals, 50))
                                 p75 = float(np.percentile(vals, 75))
-                                p90 = float(np.percentile(vals, 90))
+                                p95 = float(np.percentile(vals, 95))
                                 # build_box_whisker_panel reads a 5-tuple as
                                 # (lower-whisker, Q1, median, Q3, upper-whisker)
-                                # — exactly the cross-building 10/25/50/75/90
+                                # — exactly the cross-building 5/25/50/75/95
                                 # we just computed. No interpolation needed.
-                                out[slr_key].append((p10, p25, p50, p75, p90))
+                                out[slr_key].append((p05, p25, p50, p75, p95))
                         return out
                     
                     sd_p50 = _cross_bldg_stats('CumEAD_P50')
@@ -1995,8 +1999,8 @@ def main():
                             f"{n_aff:,} damaged buildings"
                         ),
                         y_label="Per-Building Cumulative Damage",
-                        lower_label="P10", upper_label="P90",
-                        lower_pct=0.10, upper_pct=0.90,
+                        lower_label="P05", upper_label="P95",
+                        lower_pct=0.05, upper_pct=0.95,
                     )
                     fig_pb_right = build_box_whisker_panel(
                         group_labels=[action_labels_plain[a] for a in actions_present],
@@ -2006,8 +2010,8 @@ def main():
                             f"{n_aff:,} damaged buildings"
                         ),
                         y_label="Per-Building Cumulative Damage",
-                        lower_label="P10", upper_label="P90",
-                        lower_pct=0.10, upper_pct=0.90,
+                        lower_label="P05", upper_label="P95",
+                        lower_pct=0.05, upper_pct=0.95,
                     )
                     
                     col_l, col_r = st.columns(2)
@@ -2023,7 +2027,7 @@ def main():
                         "**right panel** shows the distribution of each building's *upper-tail "
                         "(P95)* cumulative damage. Box edges show the 25th and 75th percentiles "
                         "across buildings, the white center line is the median across buildings, "
-                        "and whiskers extend to the 10th and 90th percentiles across buildings."
+                        "and whiskers extend to the 5th and 95th percentiles across buildings."
                     )
                 
                 st.divider()
