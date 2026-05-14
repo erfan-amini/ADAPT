@@ -200,7 +200,14 @@ def filter_by_occupancy(df, occupancy_selection):
 
 
 def convert_floodplain_status(status):
-    """Convert floodplain terminology to DFE terminology"""
+    """Normalize a building's DFE-status string to canonical values.
+
+    Canonical bundles already ship `DFE_Status` with the values
+    'Above DFE' / 'Under DFE' — those pass through unchanged. Legacy
+    bundles shipped the column as 'In floodplain' / 'Out of floodplain';
+    we map those to the canonical wording here so every downstream
+    comparison can assume a single vocabulary. Anything we don't
+    recognize is returned unchanged."""
     if pd.isna(status):
         return status
     if 'in floodplain' in str(status).lower() or 'in_floodplain' in str(status).lower():
@@ -340,22 +347,33 @@ def load_csv_file(filepath):
 #   {LOCATION}_bldg_lookup.csv                         — analysis-ready bldg attrs
 #   {LOCATION}_bldg_CumulativeDamage.csv               — bldg × (year, action, slr) × pcts
 #   {LOCATION}_CumulativeDamage_categories.csv         — 4 leaf categories × ... × pcts
-#   {LOCATION}_skipped_buildings.csv                   — provenance log
+#   {LOCATION}_skipped_buildings.csv                   — provenance log (optional)
 #   DDD___{LOCATION}___NSI.xlsx                        — full NSI descriptors
 #   DDD___{LOCATION}_MC_annual_max_waterlevels_P50.csv — Year × MC_0001..MC_1000
 #   DDD___{LOCATION}_MC_annual_max_waterlevels_P90.csv — same for high-end SLR
 #
-# Two structural points worth flagging up front:
-#   * `TargetYear` ships as a string column with values 'Potential', '2040',
-#     '2055', '2100'. We map 'Potential'→2025 and cast to int here so the
-#     rest of the app can keep using numeric comparisons. The original label
-#     is preserved in `target_year_labels` for display.
-#   * Categories ship only the four leaves (RES_InFP, RES_OutFP,
-#     NONRES_InFP, NONRES_OutFP). We sum them percentile-by-percentile to
-#     build All / Residential / Non-Residential rollups. This makes the
-#     InFP+OutFP split sum to the displayed total *exactly* — eliminating
-#     the ~5% reconciliation gap the old format had between sum-of-medians
-#     and median-of-sum.
+# Canonical schema (matches the current Pamunkey rerun and the format every
+# location will ship in going forward):
+#   * `{LOCATION}_bldg_lookup.csv` exposes the column `DFE_Status` with
+#     values 'Above DFE' / 'Under DFE' directly. An extra `ManufRestriction`
+#     flag may also be present for manufactured-housing-heavy inventories;
+#     it is passed through but not currently used.
+#   * `TargetYear` ships as integer-like strings ('2025', '2040', '2055',
+#     '2100'). Categories rows use the same year column.
+#   * `{LOCATION}_CumulativeDamage_categories.csv` uses the four leaves
+#     RES_UnderDFE / RES_AboveDFE / NONRES_UnderDFE / NONRES_AboveDFE.
+#
+# Legacy compatibility shims (kept so older archived bundles still load):
+#   * `Floodplain_Status` is accepted as an alias for `DFE_Status` and the
+#     legacy values 'In floodplain' / 'Out of floodplain' are normalized to
+#     'Under DFE' / 'Above DFE' via convert_floodplain_status.
+#   * `TargetYear == 'Potential'` is mapped to 2025 via
+#     _bundle_normalize_target_year.
+#   * The categories file is loaded but only used for an optional sanity
+#     check, so the legacy RES_InFP / RES_OutFP naming doesn't matter at
+#     runtime — community aggregates are now built from the per-building
+#     table (sum-of-percentiles), eliminating the ~5% reconciliation gap
+#     the old format had between sum-of-medians and median-of-sum.
 
 # Percentile manifest the bundle ships (23 columns: dense at both tails
 # plus quartiles).
@@ -398,7 +416,7 @@ def _bundle_build_attrs_table(lookup_df, nsi_df):
     """Combine bldg_lookup (analysis-ready) with NSI (descriptive).
 
     Lookup is the source of truth for fields that drove the damage
-    calculation (lon/lat, structure/content values, FFE, floodplain
+    calculation (lon/lat, structure/content values, FFE, DFE
     status, SOID). NSI contributes building_type, number_of_stories, area,
     foundation_type, foundation_height, year_built, address — fields the
     lookup doesn't carry.
@@ -412,7 +430,7 @@ def _bundle_build_attrs_table(lookup_df, nsi_df):
     out = lookup_df.merge(nsi[desc_cols], on='BuildingID', how='left')
 
     # Lowercase rename to the schema the rest of the app already references.
-    # NB: We keep `FFE_ft`, `Floodplain_Status`, and `SOID` in their original
+    # NB: We keep `FFE_ft`, `DFE_Status`, and `SOID` in their original
     # case because the existing UI code looks them up by those exact names.
     rename = {
         'BuildingID':         'id',
@@ -423,10 +441,18 @@ def _bundle_build_attrs_table(lookup_df, nsi_df):
         'GroundElevation_ft': 'ground_elevation',
         'Longitude':          'longitude',
         'Latitude':           'latitude',
+        # The canonical bundle format ships the column as `DFE_Status`
+        # with canonical values ('Above DFE' / 'Under DFE'). Legacy
+        # bundles (pre-rerun) shipped it as `Floodplain_Status` with
+        # 'In floodplain' / 'Out of floodplain' values — we accept that
+        # name as a fallback and normalize the values via
+        # convert_floodplain_status below. The function is a no-op for
+        # values that are already in canonical DFE form.
+        'Floodplain_Status':  'DFE_Status',
     }
     out = out.rename(columns=rename)
-    if 'Floodplain_Status' in out.columns:
-        out['Floodplain_Status'] = out['Floodplain_Status'].apply(convert_floodplain_status)
+    if 'DFE_Status' in out.columns:
+        out['DFE_Status'] = out['DFE_Status'].apply(convert_floodplain_status)
     return out
 
 
@@ -491,15 +517,15 @@ def load_bundle(data_folder, location_slug):
 
     # ---- Defensive correction for MATLAB Elevate no-op artifact ----
     # The MATLAB damage generator (AAA___Main_v9.m) skips the elevation math
-    # for buildings tagged `Floodplain_Status == "Out of floodplain"` and just
+    # for buildings tagged `DFE_Status == "Above DFE"` and just
     # sets `Dmg(:,:,4,si) = dmg_baseline` — i.e. Elevate equals No mitigation
-    # exactly, by construction. The Floodplain_Status flag is itself derived
+    # exactly, by construction. The DFE_Status flag is itself derived
     # from the building's first-floor elevation (FFE) being above the design
     # flood elevation (DFE = BFE + 2 ft), but FFE = ground + foundation height,
     # so a building can sit on low ground (yard/garage flood frequently) and
-    # still be tagged Out-of-floodplain because its raised foundation lifts
+    # still be tagged Above-DFE because its raised foundation lifts
     # the FFE above the DFE. The combined effect: a non-trivial number of
-    # OOF buildings have substantial baseline damage AND a no-op'd Elevate
+    # Above-DFE buildings have substantial baseline damage AND a no-op'd Elevate
     # column, which makes them look like "Residual: even elevation can't help"
     # on the Adaptation Effectiveness map — when in reality elevation simply
     # wasn't computed for them. We detect the no-op (Elevate exactly equals
@@ -610,12 +636,12 @@ def load_bundle(data_folder, location_slug):
             c: f"Total_CumEAD_{c.split('_')[1]}" for c in pct_cols_in_bldg
         })
 
-        # InFP / OutFP P50 split from Floodplain_Status. The split sums
+        # InFP / OutFP P50 split from DFE_Status. The split sums
         # to Total_CumEAD_P50 by construction (every building falls into
         # exactly one DFE bucket), so the metric reconciles cleanly.
-        if 'Floodplain_Status' in df_o.columns:
-            df_in = df_o[df_o['Floodplain_Status'] == 'Under DFE']
-            df_out = df_o[df_o['Floodplain_Status'] == 'Above DFE']
+        if 'DFE_Status' in df_o.columns:
+            df_in = df_o[df_o['DFE_Status'] == 'Under DFE']
+            df_out = df_o[df_o['DFE_Status'] == 'Above DFE']
             in_p50 = (df_in.groupby(grp_cols, as_index=False)['CumEAD_P50']
                       .sum()
                       .rename(columns={'CumEAD_P50': 'InFP_CumEAD_P50'})
@@ -837,8 +863,8 @@ def prepare_map_data(df_buildings, target_year, scenario):
         ]
         df_base = df_base.merge(df_action, on='id', how='left')
     
-    if 'Floodplain_Status' in df_base.columns:
-        df_base['Floodplain_Status'] = df_base['Floodplain_Status'].apply(convert_floodplain_status)
+    if 'DFE_Status' in df_base.columns:
+        df_base['DFE_Status'] = df_base['DFE_Status'].apply(convert_floodplain_status)
     
     return df_base
 
@@ -867,9 +893,9 @@ def aggregate_filtered_data(df_buildings, target_year, scenario):
             'Num_Buildings': df_action['id'].nunique()
         }
         
-        if 'Floodplain_Status' in df_action.columns:
-            df_under = df_action[df_action['Floodplain_Status'] == 'Under DFE']
-            df_above = df_action[df_action['Floodplain_Status'] == 'Above DFE']
+        if 'DFE_Status' in df_action.columns:
+            df_under = df_action[df_action['DFE_Status'] == 'Under DFE']
+            df_above = df_action[df_action['DFE_Status'] == 'Above DFE']
             row['InFP_CumEAD_P50'] = df_under['CumEAD_P50'].sum()
             row['OutFP_CumEAD_P50'] = df_above['CumEAD_P50'].sum()
         
@@ -1567,10 +1593,18 @@ def main():
         st.header("🎛️ Data Selection")
         
         if len(available_locations) > 0:
+            # Default to Pamunkey when it's in the bundle; otherwise the
+            # first available location (preserves prior behavior for any
+            # data folder that doesn't ship Pamunkey).
+            _default_loc_idx = 0
+            for _i, _loc in enumerate(available_locations):
+                if _loc == "Pamunkey":
+                    _default_loc_idx = _i
+                    break
             selected_location = st.selectbox(
                 "📍 Location",
                 options=available_locations,
-                index=0
+                index=_default_loc_idx
             )
         else:
             selected_location = None
@@ -1680,8 +1714,8 @@ def main():
         st.divider()
         st.header("🗺️ Map Settings")
         
-        if df_buildings is not None and 'Floodplain_Status' in df_buildings.columns:
-            fp_options = df_buildings['Floodplain_Status'].dropna().unique().tolist()
+        if df_buildings is not None and 'DFE_Status' in df_buildings.columns:
+            fp_options = df_buildings['DFE_Status'].dropna().unique().tolist()
             dfe_filter = st.multiselect(
                 "DFE Status (BFE+2)",
                 options=fp_options,
@@ -1868,8 +1902,8 @@ def main():
             # look insensitive to a control that visibly drives the Map.
             # The filter is in scope because the sidebar is rendered before
             # the tabs.
-            if dfe_filter and 'Floodplain_Status' in df_b_year.columns:
-                df_b_year = df_b_year[df_b_year['Floodplain_Status'].isin(dfe_filter)]
+            if dfe_filter and 'DFE_Status' in df_b_year.columns:
+                df_b_year = df_b_year[df_b_year['DFE_Status'].isin(dfe_filter)]
             
             if df_b_year.empty:
                 st.warning(f"No per-building data for year {target_year}.")
@@ -1891,7 +1925,7 @@ def main():
                 actions_present = [a for a in action_order if a in df_b_year['Action'].unique()]
                 
                 # When the user has restricted the view to ONLY Above-DFE
-                # buildings (Floodplain_Status == 'Out of floodplain'), drop
+                # buildings (DFE_Status == 'Above DFE'), drop
                 # Elevate from every Distributions chart on this tab. The
                 # data generator treats Elevate as a no-op for those buildings
                 # (Elevate damage = baseline damage by construction), so an
@@ -1901,7 +1935,7 @@ def main():
                 only_above_dfe = (
                     dfe_filter
                     and len(dfe_filter) == 1
-                    and 'Floodplain_Status' in df_b_year.columns
+                    and 'DFE_Status' in df_b_year.columns
                     and {str(v).strip().lower() for v in dfe_filter} <= {
                         'out of floodplain', 'out_of_floodplain', 'above dfe'
                     }
@@ -2050,9 +2084,13 @@ def main():
                         per_scen_stats[slr_key] = None
                         continue
                     
-                    d_nomit_s = ds[ds['Action'] == 'No mitigation'].set_index('id')
-                    d_wfpb_s  = ds[ds['Action'] == 'WFP B'].set_index('id')
-                    d_elev_s  = ds[ds['Action'] == 'Elevate'].set_index('id')
+                    d_nomit_s  = ds[ds['Action'] == 'No mitigation'].set_index('id')
+                    d_wfpb_s   = ds[ds['Action'] == 'WFP B'].set_index('id')
+                    d_elev_s   = ds[ds['Action'] == 'Elevate'].set_index('id')
+                    # Raise Utilities only matters for the Pamunkey variant of
+                    # fig4 below — we still always compute it so the stats
+                    # dict has a stable schema across locations.
+                    d_raiseu_s = ds[ds['Action'] == 'Raise Utilities'].set_index('id')
                     
                     n_tot_s = int(d_nomit_s.index.nunique()) if not d_nomit_s.empty else 0
                     if n_tot_s == 0:
@@ -2066,6 +2104,8 @@ def main():
                               if not d_wfpb_s.empty else None)
                     el_p90 = (d_elev_s['CumEAD_P90'].reindex(ids_s).fillna(np.nan).values
                               if not d_elev_s.empty else None)
+                    ru_p90 = (d_raiseu_s['CumEAD_P90'].reindex(ids_s).fillna(np.nan).values
+                              if not d_raiseu_s.empty else None)
                     
                     any_damage = no_p90 > thr
                     mask_p50   = no_p50 > thr
@@ -2080,6 +2120,16 @@ def main():
                         wb_arr = np.where(np.isnan(wb_p90), no_p90, wb_p90)
                         mask_wfpb = any_damage & (wb_arr <= thr)
                     
+                    # --- Raise-Utilities bucket: same threshold rule as WFP B ---
+                    # A damaged building counts here iff Raise Utilities brings
+                    # P90 ≤ $1k. Used by the Pamunkey variant of fig4 where
+                    # basement floodproofing isn't a relevant retrofit
+                    # (manufactured housing / RES2-dominant inventory).
+                    mask_raiseu = np.zeros(n_tot_s, dtype=bool)
+                    if ru_p90 is not None:
+                        ru_arr = np.where(np.isnan(ru_p90), no_p90, ru_p90)
+                        mask_raiseu = any_damage & (ru_arr <= thr)
+                    
                     # --- Elevation bucket: dominance rule (matches the Map) ---
                     # An "Elevation" building is one that is damaged at baseline,
                     # WFP Basement is NOT enough on its own, AND Elevation
@@ -2087,7 +2137,7 @@ def main():
                     # provides meaningful additional protection beyond WFP B.
                     # This replaces the earlier strict ≤$1k rule, which was too
                     # demanding under high MC realizations: most damaged
-                    # In-floodplain buildings can't get P90 below $1k with
+                    # Under-DFE buildings can't get P90 below $1k with
                     # elevation either, even though Elevate is substantially
                     # better than WFP B for them (Mastic Beach 2055-50th: median
                     # P90 ~$27k under Elevate vs ~$41k under WFP B). The
@@ -2114,6 +2164,7 @@ def main():
                         'n_sev_dmg': int(mask_sev.sum()),
                         'n_damaged': int(any_damage.sum()),
                         'n_wfpb':    int(mask_wfpb.sum()),
+                        'n_raiseu':  int(mask_raiseu.sum()),
                         'n_elev':    int(mask_elev_works.sum()),
                     }
                 
@@ -2207,17 +2258,38 @@ def main():
                     st.plotly_chart(fig3, use_container_width=True)
                     
                     # Plots 4 & 5
-                    def _v4(s):
-                        nd = s['n_damaged']
-                        return [100.0 * s['n_wfpb'] / nd if nd > 0 else 0]
-                    def _c4(s): return [s['n_wfpb']]
-                    fig4 = _make_paired_bar(
-                        f"Damaged buildings where WFP Basement eliminates "
-                        f"upper-tail damage by {target_year}",
-                        _v4, _c4,
-                        x_left='WFP Basement eliminates P90 damage',
-                        single_group=True,
-                    )
+                    # For Pamunkey, basement floodproofing isn't a relevant
+                    # retrofit (the inventory is RES2-heavy / mostly without
+                    # basements), so we swap the "WFP Basement eliminates P90"
+                    # bucket for the analogous "Raise Utilities eliminates
+                    # P90" bucket. Everything downstream (caption, summary
+                    # table column) follows the same swap so the labels stay
+                    # internally consistent.
+                    _use_raiseu_for_fig4 = (location_name == "Pamunkey")
+                    if _use_raiseu_for_fig4:
+                        def _v4(s):
+                            nd = s['n_damaged']
+                            return [100.0 * s['n_raiseu'] / nd if nd > 0 else 0]
+                        def _c4(s): return [s['n_raiseu']]
+                        fig4 = _make_paired_bar(
+                            f"Damaged buildings where Raise Utilities eliminates "
+                            f"upper-tail damage by {target_year}",
+                            _v4, _c4,
+                            x_left='Raise Utilities eliminates P90 damage',
+                            single_group=True,
+                        )
+                    else:
+                        def _v4(s):
+                            nd = s['n_damaged']
+                            return [100.0 * s['n_wfpb'] / nd if nd > 0 else 0]
+                        def _c4(s): return [s['n_wfpb']]
+                        fig4 = _make_paired_bar(
+                            f"Damaged buildings where WFP Basement eliminates "
+                            f"upper-tail damage by {target_year}",
+                            _v4, _c4,
+                            x_left='WFP Basement eliminates P90 damage',
+                            single_group=True,
+                        )
                     
                     def _v5(s):
                         nd = s['n_damaged']
@@ -2254,12 +2326,21 @@ def main():
                             continue
                         s = valid_stats[slr_key]
                         nd = s['n_damaged']
+                        # Match the table's eliminator column to the strategy
+                        # used by fig4 so the figure and the table never tell
+                        # different stories.
+                        if _use_raiseu_for_fig4:
+                            elim_col_label = 'Raise Utilities eliminates P90'
+                            elim_count = s['n_raiseu']
+                        else:
+                            elim_col_label = 'WFP Basement eliminates P90'
+                            elim_count = s['n_wfpb']
                         row = {
                             'SLR Scenario':              s['label'],
                             'Buildings':                 f"{s['n_tot']:,}",
                             'Damaged (P90 > $0)':        f"{s['n_sev_dmg']:,}  ({100*s['n_sev_dmg']/s['n_tot']:.1f}%)" if s['n_tot'] else "—",
                             'Damaged (median > $0)':     f"{s['n_p50_dmg']:,}  ({100*s['n_p50_dmg']/s['n_tot']:.1f}%)" if s['n_tot'] else "—",
-                            'WFP Basement eliminates P90':       f"{s['n_wfpb']:,}  ({100*s['n_wfpb']/nd:.1f}%)" if nd > 0 else "—",
+                            elim_col_label:              f"{elim_count:,}  ({100*elim_count/nd:.1f}%)" if nd > 0 else "—",
                         }
                         if not only_above_dfe:
                             row['Elevation > WFP B (where WFP B fails)'] = (
@@ -2271,21 +2352,38 @@ def main():
                         st.dataframe(pd.DataFrame(tbl_rows),
                                      use_container_width=True, hide_index=True)
                     
-                    st.caption(
-                        "Per-building counts use the **P90** of the per-building cumulative damage as "
-                        "the upper-tail proxy (matching the workshop visualization convention). "
-                        "The **damaged-buildings chart** shows the share of buildings with median "
-                        "damage greater than zero and the share with P90 damage greater than zero. "
-                        "The **WFP Basement chart** shows, among buildings that experience any "
-                        "damage, the share for which wet-floodproofing the basement brings P90 "
-                        "damage to ≤ $1k. The **Elevation chart** shows, among damaged buildings "
-                        "where WFP Basement is **not** sufficient on its own, the share for which "
-                        "elevation strictly outperforms WFP Basement on P90 — i.e. elevation "
-                        "provides meaningful additional protection beyond what basement "
-                        "floodproofing achieves. This dominance rule matches the Map tab's "
-                        "Adaptation Effectiveness classifier "
-                        "(No Damage → WFP Basement → Elevation → Residual)."
-                    )
+                    if _use_raiseu_for_fig4:
+                        st.caption(
+                            "Per-building counts use the **P90** of the per-building cumulative damage as "
+                            "the upper-tail proxy (matching the workshop visualization convention). "
+                            "The **damaged-buildings chart** shows the share of buildings with median "
+                            "damage greater than zero and the share with P90 damage greater than zero. "
+                            "The **Raise Utilities chart** shows, among buildings that experience any "
+                            "damage, the share for which raising utilities above BFE+2 ft brings P90 "
+                            "damage to ≤ $1k. The **Elevation chart** shows, among damaged buildings "
+                            "where WFP Basement is **not** sufficient on its own, the share for which "
+                            "elevation strictly outperforms WFP Basement on P90 — i.e. elevation "
+                            "provides meaningful additional protection beyond what basement "
+                            "floodproofing achieves. This dominance rule matches the Map tab's "
+                            "Adaptation Effectiveness classifier "
+                            "(No Damage → WFP Basement → Elevation → Residual)."
+                        )
+                    else:
+                        st.caption(
+                            "Per-building counts use the **P90** of the per-building cumulative damage as "
+                            "the upper-tail proxy (matching the workshop visualization convention). "
+                            "The **damaged-buildings chart** shows the share of buildings with median "
+                            "damage greater than zero and the share with P90 damage greater than zero. "
+                            "The **WFP Basement chart** shows, among buildings that experience any "
+                            "damage, the share for which wet-floodproofing the basement brings P90 "
+                            "damage to ≤ $1k. The **Elevation chart** shows, among damaged buildings "
+                            "where WFP Basement is **not** sufficient on its own, the share for which "
+                            "elevation strictly outperforms WFP Basement on P90 — i.e. elevation "
+                            "provides meaningful additional protection beyond what basement "
+                            "floodproofing achieves. This dominance rule matches the Map tab's "
+                            "Adaptation Effectiveness classifier "
+                            "(No Damage → WFP Basement → Elevation → Residual)."
+                        )
                 
     
     # ========================================================================
@@ -2445,8 +2543,8 @@ def main():
             if df_map is None or len(df_map) == 0:
                 st.warning("No buildings match the current filters.")
             else:
-                if dfe_filter and 'Floodplain_Status' in df_map.columns:
-                    df_map = df_map[df_map['Floodplain_Status'].isin(dfe_filter)]
+                if dfe_filter and 'DFE_Status' in df_map.columns:
+                    df_map = df_map[df_map['DFE_Status'].isin(dfe_filter)]
                 
                 # ----------------------------------------------------------
                 # "Hide $0-damage buildings" — pick the right damage metric
@@ -2558,8 +2656,8 @@ def main():
                         val_bits = []
                         if 'structure_value' in row and pd.notna(row['structure_value']):
                             val_bits.append(f"{format_currency(row['structure_value'])}")
-                        if 'Floodplain_Status' in row and pd.notna(row.get('Floodplain_Status')):
-                            val_bits.append(str(row['Floodplain_Status']))
+                        if 'DFE_Status' in row and pd.notna(row.get('DFE_Status')):
+                            val_bits.append(str(row['DFE_Status']))
                         if val_bits:
                             text += " · ".join(val_bits) + "<br>"
                         
@@ -2712,7 +2810,7 @@ def main():
                             # Earlier the Elevation bucket required Elevate ≤
                             # threshold AND WFP B > threshold. With this MC
                             # ensemble that bar is too high — for most
-                            # damaged In-floodplain buildings neither retrofit
+                            # damaged Under-DFE buildings neither retrofit
                             # gets P90 below $1k, even though Elevate is
                             # substantially more effective than WFP B (median
                             # P90 ~$27k vs ~$41k on Mastic Beach 2055-50th).
@@ -3375,8 +3473,8 @@ def main():
                         display_cols.append('occupancy_type')
                     if 'structure_value' in df_map.columns:
                         display_cols.append('structure_value')
-                    if 'Floodplain_Status' in df_map.columns:
-                        display_cols.append('Floodplain_Status')
+                    if 'DFE_Status' in df_map.columns:
+                        display_cols.append('DFE_Status')
                     display_cols.extend(action_cols_p50)
                     
                     if baseline_col:
@@ -3390,7 +3488,7 @@ def main():
                         top10[col] = top10[col].apply(format_currency)
                     
                     rename_map = {col: col.replace('_P50', '') for col in action_cols_p50}
-                    rename_map['Floodplain_Status'] = 'DFE Status'
+                    rename_map['DFE_Status'] = 'DFE Status'
                     top10 = top10.rename(columns=rename_map)
                     
                     st.dataframe(top10, use_container_width=True, hide_index=True)
@@ -4055,7 +4153,7 @@ def main():
                 df_building = df_buildings[df_buildings['id'] == selected_id]
                 building_info = df_building.iloc[0]
                 
-                building_dfe_status = building_info.get('Floodplain_Status', 'Unknown')
+                building_dfe_status = building_info.get('DFE_Status', 'Unknown')
                 is_above_dfe = building_dfe_status == 'Above DFE'
                 
                 # Header line: lead with the address when we have one (NSI
@@ -4100,9 +4198,9 @@ def main():
                     if 'structure_value' in building_info:
                         st.markdown("**Structure Value**")
                         st.write(format_currency(building_info.get('structure_value', 0)))
-                    if 'Floodplain_Status' in building_info:
+                    if 'DFE_Status' in building_info:
                         st.markdown("**DFE Status**")
-                        fp_status = building_info.get('Floodplain_Status', 'N/A')
+                        fp_status = building_info.get('DFE_Status', 'N/A')
                         if fp_status == 'Under DFE':
                             st.error(fp_status)
                         else:
@@ -4435,6 +4533,28 @@ def main():
                         'WFP 1st':         'WFP 1st Floor',
                         'Elevate':         'Elevate',
                     }
+                    # For RES2 (manufactured housing) and RES4 (small mixed-use /
+                    # temporary lodging) buildings, basement wet-floodproofing
+                    # and 1st-floor wet-floodproofing aren't viable retrofits —
+                    # these structures typically have no basement and no
+                    # conditioned 1st-floor envelope to dry out. Restrict the
+                    # benefit chart (and the strategy axis below) to the
+                    # retrofits that actually apply: Raise Utilities and
+                    # Elevate. Baseline (No Mitigation) is kept here for the
+                    # benefit-stats reference; the chart still drops it via
+                    # `bd_actions_for_chart` below.
+                    _occ_for_strategy_filter = str(
+                        building_info.get('occupancy_type', '')
+                    ).upper()
+                    _is_res2_or_res4 = (
+                        _occ_for_strategy_filter.startswith('RES2')
+                        or _occ_for_strategy_filter.startswith('RES4')
+                    )
+                    if _is_res2_or_res4:
+                        bd_action_order = [
+                            a for a in bd_action_order
+                            if a not in ('WFP B', 'WFP 1st')
+                        ]
                     bd_actions_present = [a for a in bd_action_order
                                           if a in df_building_year['Action'].unique()]
                     
