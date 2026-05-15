@@ -2448,7 +2448,13 @@ def main():
             #     re-render the TTL check runs again — so the ring
             #     disappears on its own without any explicit timer.
             HIGHLIGHT_TTL_SEC = 8.0
-            search_col1, search_col2, search_col3 = st.columns([3, 2, 5])
+            # Four columns: text input | Find+Clear buttons (narrower than before)
+            # | Point-size slider | spacer. Narrowing search_col2 from 2 → 1.5
+            # tightens up the Find/Clear button width — they fill their column
+            # via use_container_width=True, so a narrower column means thinner
+            # buttons. The slider sits right of the buttons so the user can
+            # dial marker size up or down on the fly.
+            search_col1, search_col2, search_col3, search_col4 = st.columns([3, 1.5, 3, 2.5])
             with search_col1:
                 search_id_text = st.text_input(
                     "Find building by ID",
@@ -2476,6 +2482,26 @@ def main():
                     clear_clicked = st.button("✖ Clear", key="map_search_clear",
                                               use_container_width=True)
             with search_col3:
+                # Point-size slider. Each location remembers its own setting
+                # via a location-scoped key, so switching study sites doesn't
+                # carry Pamunkey's bumped-up size over to Mastic Beach (and
+                # vice versa). Pamunkey defaults to 2× because its small
+                # building count makes the default markers read as tiny dots
+                # at the natural map zoom; other locations default to 1×.
+                _default_scale = 2.0 if location_name == "Pamunkey" else 1.0
+                _point_scale = st.slider(
+                    "Point size",
+                    min_value=0.5, max_value=4.0,
+                    value=_default_scale, step=0.25,
+                    format="%.2fx",
+                    key=f"map_point_scale_{location_name}",
+                    help=(
+                        "Scale all building markers up or down on the map. "
+                        "Useful at locations with few buildings (e.g. Pamunkey) "
+                        "where the default dots look small at the natural zoom."
+                    ),
+                )
+            with search_col4:
                 # Spacer column; deliberately empty.
                 pass
             
@@ -2696,15 +2722,11 @@ def main():
                     center_lat = df_map['latitude'].mean()
                     center_lon = df_map['longitude'].mean()
 
-                    # ---- Per-location marker scaling ----
-                    # Pamunkey has far fewer buildings than the other study
-                    # sites, so at the same map zoom the default marker sizes
-                    # read as tiny dots. Scale up all building-point markers
-                    # (and the overlays that ride on top of them, like the
-                    # non-residential ring and the search highlight) by a
-                    # constant factor so they stay legible. All other UIs
-                    # (charts, trajectory plots, fonts) are unchanged.
-                    _point_scale = 3 if location_name == "Pamunkey" else 1
+                    # `_point_scale` is set by the "Point size" slider at the
+                    # top of the map tab (see search_col3 above). All map
+                    # markers below multiply their literal sizes by this
+                    # factor so the user can dial dot size up/down on the fly.
+                    # Defaults to 2× for Pamunkey, 1× for other locations.
 
                     # =====================================================
                     # Helper: add a non-residential "ring" trace beneath
