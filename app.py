@@ -2952,15 +2952,33 @@ def main():
                         # Required columns — P90 is the upper-tail proxy
                         # (matches the Distributions tab and the workshop
                         # convention).
+                        #
+                        # Per-location action swap: for Pamunkey, WFP Basement
+                        # is non-applicable (RES2 / pier inventory, no
+                        # basements — the applicability filter in load_bundle
+                        # drops those rows entirely). The cheapest retrofit
+                        # that actually eliminates upper-tail damage there is
+                        # Raise Utilities, so we plug it into the "cheapest
+                        # retrofit that eliminates damage" slot of the
+                        # classifier. The internal variable names below keep
+                        # the `wfpb*` spelling for code economy — they hold
+                        # whichever retrofit is playing that role for the
+                        # current location.
                         col_nomit = 'No mitigation_P90'
-                        col_wfpb  = 'WFP B_P90'
+                        if location_name == "Pamunkey":
+                            col_wfpb = 'Raise Utilities_P90'
+                            cheap_retrofit_label = 'Raise Utilities'
+                        else:
+                            col_wfpb = 'WFP B_P90'
+                            cheap_retrofit_label = 'WFP Basement'
                         col_elev  = 'Elevate_P90'
                         
                         missing = [c for c in (col_nomit, col_wfpb, col_elev)
                                    if c not in df_map.columns]
                         if missing:
                             st.warning(
-                                f"This view needs P90 columns for No mitigation, WFP B, and Elevate. "
+                                f"This view needs P90 columns for No mitigation, "
+                                f"{cheap_retrofit_label}, and Elevate. "
                                 f"Missing: {', '.join(missing)}"
                             )
                         else:
@@ -3044,9 +3062,9 @@ def main():
                             # Buildings classified as Residual are simply not
                             # plotted on this view.
                             cat_specs = [
-                                (1, 'No Damage',        '#22c55e'),  # green
-                                (2, 'WFP Basement',     '#facc15'),  # yellow
-                                (3, 'Elevation',        '#f97316'),  # orange
+                                (1, 'No Damage',            '#22c55e'),  # green
+                                (2, cheap_retrofit_label,   '#facc15'),  # yellow
+                                (3, 'Elevation',            '#f97316'),  # orange
                             ]
                             
                             for ci, label, color in cat_specs:
@@ -3383,15 +3401,24 @@ def main():
                             "damage." + cap_note
                         )
                     elif map_view == "Adaptation Effectiveness":
+                        # Caption uses the same per-location action swap as
+                        # the classifier above: for Pamunkey, "Raise Utilities"
+                        # plays the role of "WFP Basement" everywhere else.
+                        if location_name == "Pamunkey":
+                            _cheap_lbl = "Raise Utilities"
+                            _cheap_desc = "raising at-risk utilities"
+                        else:
+                            _cheap_lbl = "WFP Basement"
+                            _cheap_desc = "basement floodproofing"
                         st.caption(
                             "Each building is colored by the **most effective adaptation** "
                             "for its upper-tail (P90) cumulative damage under the selected "
                             "year and SLR scenario. Categories are checked in order: "
                             "**No Damage** (baseline P90 ≤ $1k — no intervention needed) → "
-                            "**WFP Basement** (basement floodproofing brings P90 ≤ $1k — "
+                            f"**{_cheap_lbl}** ({_cheap_desc} brings P90 ≤ $1k — "
                             "the cheapest fix that eliminates damage) → "
-                            "**Elevation** (WFP Basement isn't sufficient, but elevation "
-                            "strictly outperforms WFP Basement on P90 — elevation provides "
+                            f"**Elevation** ({_cheap_lbl} isn't sufficient, but elevation "
+                            f"strictly outperforms {_cheap_lbl} on P90 — elevation provides "
                             "meaningful additional protection). "
                             "Each building appears in exactly one color, and the legend counts "
                             "partition the buildings shown. Non-residential buildings are "
