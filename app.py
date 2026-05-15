@@ -2695,7 +2695,17 @@ def main():
                     # ---- Common map center ----
                     center_lat = df_map['latitude'].mean()
                     center_lon = df_map['longitude'].mean()
-                    
+
+                    # ---- Per-location marker scaling ----
+                    # Pamunkey has far fewer buildings than the other study
+                    # sites, so at the same map zoom the default marker sizes
+                    # read as tiny dots. Scale up all building-point markers
+                    # (and the overlays that ride on top of them, like the
+                    # non-residential ring and the search highlight) by a
+                    # constant factor so they stay legible. All other UIs
+                    # (charts, trajectory plots, fonts) are unchanged.
+                    _point_scale = 3 if location_name == "Pamunkey" else 1
+
                     # =====================================================
                     # Helper: add a non-residential "ring" trace beneath
                     # any colored category trace
@@ -2730,7 +2740,7 @@ def main():
                             fig_map.add_trace(go.Scattermapbox(
                                 lat=df_zero['latitude'], lon=df_zero['longitude'],
                                 mode='markers',
-                                marker=dict(size=8, color='#22c55e', opacity=0.85),
+                                marker=dict(size=8 * _point_scale, color='#22c55e', opacity=0.85),
                                 hovertemplate='%{customdata[0]}<extra></extra>',
                                 customdata=list(df_zero['hover_data']),
                                 name='No Damage ($0)'
@@ -2748,7 +2758,7 @@ def main():
                                 lat=df_nonzero['latitude'], lon=df_nonzero['longitude'],
                                 mode='markers',
                                 marker=dict(
-                                    size=10,
+                                    size=10 * _point_scale,
                                     color=df_nonzero[baseline_col],
                                     colorscale=[
                                         [0,    '#facc15'],
@@ -2892,16 +2902,16 @@ def main():
                                     fig_map.add_trace(go.Scattermapbox(
                                         lat=[None], lon=[None],
                                         mode='markers',
-                                        marker=dict(size=8, color=color, opacity=0.92),
+                                        marker=dict(size=8 * _point_scale, color=color, opacity=0.92),
                                         name=f"{label} ({legend_count})",
                                         showlegend=True, hoverinfo='skip',
                                     ))
                                     continue
-                                _add_nonres_ring(fig_map, df_c, ring_size=13)
+                                _add_nonres_ring(fig_map, df_c, ring_size=13 * _point_scale)
                                 fig_map.add_trace(go.Scattermapbox(
                                     lat=df_c['latitude'], lon=df_c['longitude'],
                                     mode='markers',
-                                    marker=dict(size=8, color=color, opacity=0.92),
+                                    marker=dict(size=8 * _point_scale, color=color, opacity=0.92),
                                     hovertemplate='%{customdata[0]}<extra></extra>',
                                     customdata=list(df_c['hover_data']),
                                     name=f"{label} ({legend_count})",
@@ -2912,7 +2922,7 @@ def main():
                                 fig_map.add_trace(go.Scattermapbox(
                                     lat=[None], lon=[None],
                                     mode='markers',
-                                    marker=dict(size=10, color='black', opacity=0.85),
+                                    marker=dict(size=10 * _point_scale, color='black', opacity=0.85),
                                     name='Non-Residential (ringed)',
                                     showlegend=True, hoverinfo='skip',
                                 ))
@@ -2942,11 +2952,11 @@ def main():
                             # ---- Plot the green "No Damage" layer first, so the
                             # damaged-building markers draw on top of it. ----
                             if n_no_dmg > 0:
-                                _add_nonres_ring(fig_map, df_no_dmg, ring_size=13)
+                                _add_nonres_ring(fig_map, df_no_dmg, ring_size=13 * _point_scale)
                                 fig_map.add_trace(go.Scattermapbox(
                                     lat=df_no_dmg['latitude'], lon=df_no_dmg['longitude'],
                                     mode='markers',
-                                    marker=dict(size=8, color='#22c55e', opacity=0.85),
+                                    marker=dict(size=8 * _point_scale, color='#22c55e', opacity=0.85),
                                     hovertemplate='%{customdata[0]}<extra></extra>',
                                     customdata=list(df_no_dmg['hover_data']),
                                     name=f"No Damage ($0)  ({n_no_dmg})",
@@ -3009,11 +3019,11 @@ def main():
                                     if len(df_c) == 0:
                                         continue
                                     count = len(df_c)
-                                    _add_nonres_ring(fig_map, df_c, ring_size=13)
+                                    _add_nonres_ring(fig_map, df_c, ring_size=13 * _point_scale)
                                     fig_map.add_trace(go.Scattermapbox(
                                         lat=df_c['latitude'], lon=df_c['longitude'],
                                         mode='markers',
-                                        marker=dict(size=8, color=bin_colors[ci], opacity=0.92),
+                                        marker=dict(size=8 * _point_scale, color=bin_colors[ci], opacity=0.92),
                                         hovertemplate='%{customdata[0]}<extra></extra>',
                                         customdata=list(df_c['hover_data']),
                                         name=f"{bin_labels[ci]} ({count})",
@@ -3033,7 +3043,7 @@ def main():
                                 fig_map.add_trace(go.Scattermapbox(
                                     lat=[None], lon=[None],
                                     mode='markers',
-                                    marker=dict(size=10, color='black', opacity=0.85),
+                                    marker=dict(size=10 * _point_scale, color='black', opacity=0.85),
                                     name='Non-Residential (ringed)',
                                     showlegend=True, hoverinfo='skip',
                                 ))
@@ -3072,7 +3082,7 @@ def main():
                             fig_map.add_trace(go.Scattermapbox(
                                 lat=[_hl_lat], lon=[_hl_lon],
                                 mode='markers',
-                                marker=dict(size=44, color='rgba(217, 70, 239, 0.32)'),
+                                marker=dict(size=44 * _point_scale, color='rgba(217, 70, 239, 0.32)'),
                                 hoverinfo='skip',
                                 showlegend=False,
                                 name='_search_halo',
@@ -3081,7 +3091,7 @@ def main():
                             fig_map.add_trace(go.Scattermapbox(
                                 lat=[_hl_lat], lon=[_hl_lon],
                                 mode='markers',
-                                marker=dict(size=22, color='rgba(217, 70, 239, 0.95)'),
+                                marker=dict(size=22 * _point_scale, color='rgba(217, 70, 239, 0.95)'),
                                 hovertemplate=f'<b>{_hl_label}</b><extra></extra>',
                                 showlegend=True,
                                 name=f'🔍 {_hl_label}',
