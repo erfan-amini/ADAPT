@@ -3106,50 +3106,81 @@ def main():
                             wfpb   = np.where(np.isnan(wfpb_raw), no_mit, wfpb_raw)
                             elev   = np.where(np.isnan(elev_raw), no_mit, elev_raw)
                             
-                            # --- MAP classifier (dominance rule) ---
-                            # Earlier the Elevation bucket required Elevate ≤
-                            # threshold AND WFP B > threshold. With this MC
-                            # ensemble that bar is too high — for most
-                            # damaged Under-DFE buildings neither retrofit
-                            # gets P90 below $1k, even though Elevate is
-                            # substantially more effective than WFP B (median
-                            # P90 ~$27k vs ~$41k on Mastic Beach 2055-50th).
-                            # We now classify by which retrofit is most
-                            # effective, not which one crosses an arbitrary
-                            # threshold:
-                            #   1 = No Damage      (baseline ≤ threshold)
-                            #   2 = WFP Basement   (damaged AND WFP B ≤ threshold —
-                            #                       the cheapest fix that "eliminates"
-                            #                       damage)
-                            #   3 = Elevation      (damaged AND WFP B > threshold AND
-                            #                       Elevate strictly beats WFP B —
-                            #                       elevation provides meaningful
-                            #                       additional protection)
-                            #   4 = Residual       (damaged AND WFP B > threshold AND
-                            #                       Elevate ≥ WFP B — neither retrofit
-                            #                       does meaningfully better than the
-                            #                       other; consider buyout / non-retrofit
-                            #                       options)
-                            # NB: the dominance rule auto-handles the MATLAB
-                            # convention where Elevate is set to baseline for
-                            # already-Above-DFE buildings — those buildings
-                            # have Elevate ≥ WFP B by construction, so they
-                            # never qualify for the Elevation bucket here.
-                            wfpb_to_thr        = wfpb <= thr
-                            elev_dominates_wfpb = elev < wfpb
-                            
-                            # Priority classification (controls both marker COLOR and
-                            # the LEGEND count on the map):
-                            #   1 = No Damage  > 2 = WFP Basement > 3 = Elevation > 4 = Residual
-                            cat = np.full(len(df_map), 4, dtype=int)
+                            # --- MAP classifier (threshold rule) ---
+                            # Five buckets ordered by the cheapest adaptation
+                            # that brings upper-tail damage below the $1k
+                            # "no damage" threshold. Reading the colors top
+                            # to bottom gives a decision pyramid: do nothing →
+                            # cheap retrofit → expensive retrofit (elevation) →
+                            # nothing works.
+                            #
+                            #   1 = No Damage     baseline P90 ≤ thr
+                            #   2 = Cheap fix     baseline > thr AND the
+                            #                     cheap retrofit (WFP Basement
+                            #                     elsewhere, Raise Utilities
+                            #                     in Pamunkey) brings P90 ≤ thr
+                            #   3 = Elevation     baseline > thr, cheap retrofit
+                            #                     doesn't reach thr, but elevation
+                            #                     DOES bring P90 ≤ thr
+                            #   4 = Residual      Under-DFE, damaged, neither
+                            #                     retrofit (cheap nor elevation)
+                            #                     brings P90 ≤ thr — even the
+                            #                     strongest adaptation in scope
+                            #                     leaves residual damage, so the
+                            #                     conversation has to move to
+                            #                     buyout / relocation / managed
+                            #                     retreat. Drawn in red.
+                            #   5 = Out of scope  Above-DFE buildings that fall
+                            #                     through (their retrofit options
+                            #                     are different from those in the
+                            #                     three-bucket pyramid above —
+                            #                     e.g., WFP 1st Floor, dry
+                            #                     floodproofing, content-only).
+                            #                     Not plotted on this view, since
+                            #                     coloring them red would
+                            #                     misrepresent "the menu shown
+                            #                     here doesn't cover this case"
+                            #                     as "this building is doomed".
+                            #
+                            # NB: the earlier version used a *dominance* rule
+                            # for cat=3 (Elevate < WFP B, even if neither hit
+                            # thr). That was retired when the Residual bucket
+                            # came back: keeping dominance would have meant
+                            # damaged Under-DFE buildings where elevation
+                            # merely beat WFP B (but still left tens of thousands
+                            # of dollars of damage) got colored orange
+                            # "Elevation works", contradicting the new red
+                            # "even elevation leaves residual" bucket. The
+                            # threshold rule makes the orange/red split honest:
+                            # orange means elevation eliminates damage, red
+                            # means it doesn't.
+                            wfpb_to_thr = wfpb <= thr
+                            elev_to_thr = elev <= thr
+
+                            # Under-DFE membership mask (Above-DFE buildings
+                            # are NEVER classified as Residual — they fall
+                            # through to cat=5 / omitted instead).
+                            if 'DFE_Status' in df_map.columns:
+                                _dfe_lower = (df_map['DFE_Status']
+                                              .fillna('').astype(str)
+                                              .str.strip().str.lower())
+                                is_under_dfe = _dfe_lower.str.contains('under').values
+                            else:
+                                is_under_dfe = np.zeros(len(df_map), dtype=bool)
+
+                            # Priority classification. Default = 5 (out of
+                            # scope / omitted) so any building not affirmatively
+                            # placed in 1–4 drops off the map quietly.
+                            cat = np.full(len(df_map), 5, dtype=int)
                             cat[no_mit <= thr] = 1
                             cat[(no_mit > thr) & wfpb_to_thr] = 2
-                            cat[(no_mit > thr) & ~wfpb_to_thr & elev_dominates_wfpb] = 3
-                            
+                            cat[(no_mit > thr) & ~wfpb_to_thr & elev_to_thr] = 3
+                            cat[(no_mit > thr) & ~wfpb_to_thr & ~elev_to_thr & is_under_dfe] = 4
+
                             df_map['_cat_action'] = cat
-                            
-                            # Legend counts = strict-priority counts (each building
-                            # appears in exactly one bucket).
+
+                            # Legend counts — each building appears in exactly
+                            # one bucket, so these add up to (buildings shown).
                             n_no_damage  = int((cat == 1).sum())
                             n_wfpb_works = int((cat == 2).sum())
                             n_elev_works = int((cat == 3).sum())
@@ -3158,24 +3189,17 @@ def main():
                                 1: n_no_damage,
                                 2: n_wfpb_works,
                                 3: n_elev_works,
+                                4: n_residual,
                             }
-                            
-                            # Workshop palette (RGB normalized).
-                            # Residual Damage (cat 4) is intentionally OMITTED
-                            # from the visible categories: in the current data
-                            # generator, a "Residual" classification primarily
-                            # reflects the MATLAB no-op convention for Above-DFE
-                            # buildings (where Elevate is set to baseline) rather
-                            # than a physical conclusion that no retrofit can
-                            # save the building. Coloring those red was reading
-                            # as "doomed coastal property" when really it was
-                            # "data generator skipped the elevation math here."
-                            # Buildings classified as Residual are simply not
-                            # plotted on this view.
+
+                            # Workshop palette + red residual.
+                            # cat=5 (Above-DFE fall-through) is intentionally
+                            # absent from cat_specs and therefore not plotted.
                             cat_specs = [
                                 (1, 'No Damage',            '#22c55e'),  # green
                                 (2, cheap_retrofit_label,   '#facc15'),  # yellow
                                 (3, 'Elevation',            '#f97316'),  # orange
+                                (4, 'Residual Damage',      '#dc2626'),  # red
                             ]
                             
                             for ci, label, color in cat_specs:
@@ -3537,18 +3561,26 @@ def main():
                             _cheap_lbl = "WFP Basement"
                             _cheap_desc = "basement floodproofing"
                         st.caption(
-                            "Each building is colored by the **most effective adaptation** "
-                            "for its upper-tail (P90) cumulative damage under the selected "
-                            "year and SLR scenario. Categories are checked in order: "
+                            "Each building is colored by the **cheapest adaptation that "
+                            "eliminates** its upper-tail (P90) cumulative damage under "
+                            "the selected year and SLR scenario. Buckets are checked in "
+                            "priority order: "
                             "**No Damage** (baseline P90 ≤ $1k — no intervention needed) → "
-                            f"**{_cheap_lbl}** ({_cheap_desc} brings P90 ≤ $1k — "
-                            "the cheapest fix that eliminates damage) → "
-                            f"**Elevation** ({_cheap_lbl} isn't sufficient, but elevation "
-                            f"strictly outperforms {_cheap_lbl} on P90 — elevation provides "
-                            "meaningful additional protection). "
-                            "Each building appears in exactly one color, and the legend counts "
-                            "partition the buildings shown. Non-residential buildings are "
-                            "marked with a black ring."
+                            f"**{_cheap_lbl}** ({_cheap_desc} brings P90 ≤ $1k) → "
+                            f"**Elevation** ({_cheap_lbl} doesn't reach the threshold but "
+                            "elevation does) → "
+                            "**Residual Damage** (Under-DFE buildings where neither "
+                            f"{_cheap_lbl.lower()} nor elevation can bring P90 ≤ $1k — "
+                            "the conversation has to move beyond retrofits, to buyout, "
+                            "relocation, or larger community-scale interventions). "
+                            "Above-DFE buildings whose damage isn't eliminated by the "
+                            f"two retrofits shown ({_cheap_lbl} or elevation) are not "
+                            "plotted on this view — their relevant adaptation options "
+                            "(wet floodproofing the first floor, content-only measures, "
+                            "etc.) aren't represented in the three-bucket pyramid above. "
+                            "Each building appears in exactly one color, and the legend "
+                            "counts partition the buildings shown. Non-residential "
+                            "buildings are marked with a black ring."
                         )
                     elif map_view == "Damage Bins":
                         st.caption(
