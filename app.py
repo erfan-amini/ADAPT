@@ -2894,8 +2894,36 @@ def main():
                             text += " · ".join(val_bits) + "<br>"
                         
                         text += "<br><b>Cumulative Damage by strategy</b><br>"
-                        
-                        baseline_val = row.get('No mitigation_P50', 0)
+
+                        # No Mitigation gets two values because the three map
+                        # views use TWO different statistics to color the
+                        # buildings:
+                        #   • Damage Heatmap         → P50 (median)
+                        #   • Damage Bins            → P90 (upper tail)
+                        #   • Adaptation Effectiveness → P90 (upper tail)
+                        # Showing only the P50 here used to confuse users on
+                        # the P90-based views: a building with P50 = $14.6k
+                        # and P90 = $250k would land in a "$100k–$500k" bin
+                        # and look misclassified, because the user couldn't
+                        # see the P90 value that put it there. Surface both
+                        # so the bin / category placement is always traceable
+                        # from the hover.
+                        baseline_p50 = row.get('No mitigation_P50', 0)
+                        baseline_p90 = row.get('No mitigation_P90', np.nan)
+                        baseline_val = baseline_p50  # the rest of the loop uses P50 for savings %
+
+                        if (pd.notna(baseline_p90)
+                            and pd.notna(baseline_p50)
+                            and not np.isclose(baseline_p50, baseline_p90)):
+                            text += (
+                                f"<b>No Mitigation</b>: "
+                                f"{format_currency(baseline_p50)} (median) · "
+                                f"{format_currency(baseline_p90)} (P90)<br>"
+                            )
+                            _no_mit_shown_inline = True
+                        else:
+                            _no_mit_shown_inline = False
+
                         for col in action_cols_p50:
                             action_name = col.replace('_P50', '')
                             val = row.get(col, 0)
@@ -2909,6 +2937,11 @@ def main():
                             # Skipping the line entirely is what "hide it
                             # completely" actually looks like in the hover.
                             if action_name != 'No mitigation' and pd.isna(val):
+                                continue
+
+                            # Skip the No-mitigation column here if we already
+                            # rendered it inline with both percentiles above.
+                            if action_name == 'No mitigation' and _no_mit_shown_inline:
                                 continue
 
                             display_name = action_name
