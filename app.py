@@ -133,12 +133,21 @@ st.markdown("""
 
     /* Compact buttons — shorter overall height by trimming vertical padding.
        Applies to every st.button in the app for visual consistency. Width
-       and font size are untouched, so button labels still fit on one line. */
+       and font size are untouched, so button labels still fit on one line.
+       `white-space: nowrap` on the inner paragraph forces the icon and the
+       label to stay on a single horizontal line — without it, Streamlit
+       would break "🔍 Find" into two stacked lines whenever the column
+       got narrow, which doubled the button's height. */
     .stButton > button {
         padding-top: 0.25rem !important;
         padding-bottom: 0.25rem !important;
         min-height: 0 !important;
         line-height: 1.3 !important;
+        white-space: nowrap !important;
+    }
+    .stButton > button p {
+        white-space: nowrap !important;
+        margin: 0 !important;
     }
 </style>
 """, unsafe_allow_html=True)
