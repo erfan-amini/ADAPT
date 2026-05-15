@@ -920,6 +920,18 @@ def compute_damage_bin_breaks(df_buildings, scenario,
     Effectiveness" classifier — so the same building gets the same
     Damage-Bins color, the same Adaptation-Effectiveness category, and the
     same Distributions-tab bucket.
+
+    When `nice_round_up` snapping causes two or more adjacent quantile
+    breaks to collapse to the same value (common at locations like Pamunkey
+    where most damages are clustered in a small dollar range), we return
+    FEWER unique breaks rather than extrapolating upward. The earlier
+    "pad-upward" behavior invented top breakpoints beyond the actual data
+    range (e.g., a $25k top break for a dataset that maxes out around $12k),
+    which inflated the legend and pushed mid-range buildings into a
+    "red" bin despite being entirely typical for the location. Accepting
+    a smaller number of bins is honest about what the data supports and
+    keeps the downstream palette/labels/digitize logic intact (they all
+    work with any 1–4 unique breaks → 2–5 bins).
     """
     df_nm = df_buildings[
         (df_buildings['Action'] == 'No mitigation') &
@@ -940,15 +952,7 @@ def compute_damage_bin_breaks(df_buildings, scenario,
     for v in nice:
         if v > 0 and v not in seen:
             seen.add(v); unique_nice.append(v)
-    # If snapping collapsed adjacent breaks, pad upward so we still have
-    # the requested number of distinct levels.
-    while len(unique_nice) < len(p_breaks) and unique_nice:
-        last = unique_nice[-1]
-        nxt = nice_round_up(last * 2.5)
-        if nxt <= last:
-            break
-        unique_nice.append(nxt)
-    return sorted(unique_nice)[:len(p_breaks)]
+    return sorted(unique_nice)
 
 
 def prepare_map_data(df_buildings, target_year, scenario):
@@ -3235,7 +3239,16 @@ def main():
                                     # current year's data
                                     raw_breaks = np.quantile(nonzero, [0.20, 0.40, 0.60, 0.80])
                                     breaks = sorted({nice_round_up(v) for v in raw_breaks if v > 0})[:4]
-                                # bin edges for damaged buildings: thr, b1, b2, b3, b4, +inf  (5 bins)
+                                # bin edges for damaged buildings: thr, b1, …, bk, +inf
+                                # where k = len(breaks) ∈ [1..4], giving 2..5 bins.
+                                # The bin count is data-driven: locations with
+                                # tightly-clustered damages collapse adjacent
+                                # quantile breaks during nice-number rounding, and
+                                # we now ACCEPT the lower bin count rather than
+                                # extrapolating breaks beyond the actual data
+                                # range (which used to push typical buildings
+                                # into a misleadingly-red bin at low-damage
+                                # locations like Pamunkey).
                                 edges = [float(thr)] + breaks + [np.inf]
                                 n_bins = len(edges) - 1
                                 
