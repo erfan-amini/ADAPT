@@ -130,6 +130,16 @@ st.markdown("""
         color: #94a3b8;
         margin-top: 0.5rem;
     }
+
+    /* Compact buttons — shorter overall height by trimming vertical padding.
+       Applies to every st.button in the app for visual consistency. Width
+       and font size are untouched, so button labels still fit on one line. */
+    .stButton > button {
+        padding-top: 0.25rem !important;
+        padding-bottom: 0.25rem !important;
+        min-height: 0 !important;
+        line-height: 1.3 !important;
+    }
 </style>
 """, unsafe_allow_html=True)
 
@@ -2448,13 +2458,13 @@ def main():
             #     re-render the TTL check runs again — so the ring
             #     disappears on its own without any explicit timer.
             HIGHLIGHT_TTL_SEC = 8.0
-            # Four columns: text input | Find+Clear buttons (narrower than before)
-            # | Point-size slider | spacer. Narrowing search_col2 from 2 → 1.5
-            # tightens up the Find/Clear button width — they fill their column
-            # via use_container_width=True, so a narrower column means thinner
-            # buttons. The slider sits right of the buttons so the user can
-            # dial marker size up or down on the fly.
-            search_col1, search_col2, search_col3, search_col4 = st.columns([3, 1.5, 3, 2.5])
+            # Four columns: text input | Find+Clear buttons | Point-size slider
+            # | spacer. The buttons themselves are made shorter (less vertical
+            # padding) via the global `.stButton > button` CSS rule at the top
+            # of the file — that's how we get a compact button row WITHOUT
+            # squashing the labels onto two lines. Width here is just wide
+            # enough that "🔍 Find" and "✖ Clear" each fit on a single line.
+            search_col1, search_col2, search_col3, search_col4 = st.columns([3, 2, 3, 2])
             with search_col1:
                 search_id_text = st.text_input(
                     "Find building by ID",
@@ -2472,8 +2482,10 @@ def main():
             with search_col2:
                 # Spacer above the buttons so they vertically line up with
                 # the text input baseline (Streamlit reserves label space
-                # above the input). One markdown line ≈ the label height.
-                st.markdown("<div style='height:1.85em'></div>", unsafe_allow_html=True)
+                # above the input). Slightly larger than the original 1.85em
+                # because the buttons are now shorter (compact CSS rule), so
+                # they need to be pushed down a hair further to stay flush.
+                st.markdown("<div style='height:2.05em'></div>", unsafe_allow_html=True)
                 btn_a, btn_b = st.columns(2)
                 with btn_a:
                     find_clicked = st.button("🔍 Find", key="map_search_find",
