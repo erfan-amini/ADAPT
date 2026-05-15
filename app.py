@@ -1045,12 +1045,48 @@ def aggregate_filtered_data(df_buildings, target_year, scenario):
 # requirement (https://www.openstreetmap.org/copyright).
 _BASEMAP_ATTRIB = {
     "open-street-map":  "© OpenStreetMap contributors",
+    "Streets":          "© OpenStreetMap contributors",  # alias for the live-map radio
     "carto-positron":   "© OpenStreetMap contributors • © CARTO",
     "carto-darkmatter": "© OpenStreetMap contributors • © CARTO",
     "stamen-terrain":   "© OpenStreetMap contributors • Stamen Design",
     "stamen-toner":     "© OpenStreetMap contributors • Stamen Design",
+    "Aerial":           "Tiles © Esri, Maxar, Earthstar Geographics",
     "white-bg":         "",
 }
+
+
+# ESRI World Imagery raster tile source — overlaid on a white-bg base
+# to render aerial photography without needing a Mapbox access token.
+# (Plotly's native "satellite" / "satellite-streets" styles do require
+# a token; ESRI's public tiles do not, which keeps the app working out
+# of the box for anyone running it locally.) An internet connection is
+# required at render time; if the tile server is unreachable the map
+# will simply show a white background and the building dots.
+_ESRI_WORLD_IMAGERY_LAYER = {
+    "below": "traces",
+    "sourcetype": "raster",
+    "sourceattribution": "Tiles © Esri",
+    "source": [
+        "https://server.arcgisonline.com/ArcGIS/rest/services/"
+        "World_Imagery/MapServer/tile/{z}/{y}/{x}"
+    ],
+}
+
+
+def _basemap_config(name):
+    """Translate a user-facing basemap label to the (style, layers) pair
+    that plotly's `mapbox` layout sub-dict expects.
+
+    "Streets" → OpenStreetMap, no extra layers.
+    "Aerial"  → white background with the ESRI World Imagery raster
+                layer drawn beneath the data traces.
+    Anything else is passed through as a literal plotly mapbox style.
+    """
+    if name == "Aerial":
+        return "white-bg", [_ESRI_WORLD_IMAGERY_LAYER]
+    if name == "Streets":
+        return "open-street-map", []
+    return name, []
 
 
 def _nice_scalebar_meters(target_m):
@@ -1213,6 +1249,22 @@ def build_publication_map_figure(fig_map, *, location, occupancy, target_year,
     # bar renders identically regardless of basemap choice.
     mapbox_layers = []
 
+    # Translate the "Aerial" pseudo-style into its real implementation
+    # (white-bg background + ESRI World Imagery raster tile layer).
+    # Doing this here means the rest of the export pipeline can keep
+    # treating mapbox_style as a flat string. The export-time tile fetch
+    # uses the same ESRI endpoint as the live map, so if the tiles fail
+    # to load the export falls back to a plain white background and the
+    # data markers stay readable.
+    # NB: we remember the user-facing name in `attrib_key` BEFORE
+    # overwriting `mapbox_style`, so the attribution lookup below still
+    # resolves to the ESRI credit (white-bg by itself has no attribution
+    # and would otherwise drop the basemap line from the export footer).
+    attrib_key = mapbox_style
+    if mapbox_style == "Aerial":
+        mapbox_style = "white-bg"
+        mapbox_layers = [_ESRI_WORLD_IMAGERY_LAYER]
+
     # ----- Title and footer in paper coordinates -----
     title_main = f"Building-level Flood Risk — {location}"
     if occupancy and occupancy != "All":
@@ -1221,7 +1273,7 @@ def build_publication_map_figure(fig_map, *, location, occupancy, target_year,
                  f"{map_view}")
     today = _date.today().strftime("%B %Y")
 
-    attrib = _BASEMAP_ATTRIB.get(mapbox_style, "© OpenStreetMap contributors")
+    attrib = _BASEMAP_ATTRIB.get(attrib_key, "© OpenStreetMap contributors")
     # Skip the "Basemap:" segment when there's no tile attribution to show
     # (e.g. ``white-bg``), which avoids a dangling "Basemap:  •" in the footer.
     footer_parts = [
@@ -2554,6 +2606,28 @@ def main():
                     "**Adaptation Effectiveness**: classifies each building by which retrofit eliminates upper-tail damage."
                 ),
             )
+
+            # Basemap choice for the live map. "Streets" is the original
+            # OpenStreetMap default; "Aerial" overlays ESRI World Imagery
+            # tiles, which is useful for locating individual buildings,
+            # spotting parking lots, vegetation, and shoreline detail
+            # that an abstract street map doesn't show. The choice is
+            # remembered globally (one key, not per-location) since it's
+            # a UI preference rather than data.
+            basemap_choice = st.radio(
+                "Basemap",
+                options=["Streets", "Aerial"],
+                horizontal=True,
+                key="map_basemap_choice",
+                help=(
+                    "**Streets**: OpenStreetMap road network and place labels. "
+                    "**Aerial**: satellite imagery (ESRI World Imagery) — useful for "
+                    "spotting individual buildings, parking lots, vegetation, and "
+                    "shoreline detail. Requires internet access at render time; if "
+                    "the tile server is unreachable the map will fall back to a "
+                    "white background."
+                ),
+            )
             
             # ----------------------------------------------------------
             # Building-ID search — drops a temporary highlight ring on
@@ -3295,9 +3369,15 @@ def main():
                                 pass
                     
                     # ---- Common layout ----
+                    # Resolve the user's basemap choice (Streets / Aerial) into
+                    # the (style, layers) pair plotly needs. Aerial is a
+                    # white-bg style with an ESRI raster tile layer drawn
+                    # under the data traces; Streets is plain OSM.
+                    _bm_style, _bm_layers = _basemap_config(basemap_choice)
                     fig_map.update_layout(
                         mapbox=dict(
-                            style="open-street-map",
+                            style=_bm_style,
+                            layers=_bm_layers,
                             center=dict(lat=center_lat, lon=center_lon),
                             zoom=12
                         ),
@@ -3504,6 +3584,7 @@ def main():
                             options=[
                                 "carto-positron",
                                 "carto-darkmatter",
+                                "Aerial",
                                 "white-bg (no basemap)",
                             ],
                             index=0,   # carto-positron is the cleanest print default
@@ -3512,11 +3593,14 @@ def main():
                                  "if a tile server refuses the request the export will "
                                  "auto-fall-back to a white background. `carto-positron` "
                                  "(light, neutral) and `carto-darkmatter` (dark) are the "
-                                 "preferred print styles. Pick `white-bg` for a guaranteed-"
-                                 "working export with no roads/labels. OpenStreetMap is "
-                                 "intentionally excluded — its tile servers block headless "
-                                 "render requests, so OSM exports come back covered in "
-                                 "'Access blocked' tiles."
+                                 "preferred print styles. `Aerial` uses ESRI World "
+                                 "Imagery satellite tiles — great for showing physical "
+                                 "context (shorelines, vegetation, building footprints) "
+                                 "but heavier and lower-contrast in print. Pick "
+                                 "`white-bg` for a guaranteed-working export with no "
+                                 "roads/labels. OpenStreetMap is intentionally excluded "
+                                 "— its tile servers block headless render requests, so "
+                                 "OSM exports come back covered in 'Access blocked' tiles."
                         )
                         
                         # Third row: framing override.
