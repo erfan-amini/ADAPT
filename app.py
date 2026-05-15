@@ -199,6 +199,52 @@ def is_residential(occupancy_type):
     return occ.startswith('RES')
 
 
+# NSI foundation_type codes that mean "this building has a basement that
+# could plausibly be wet-floodproofed". Anything else (Pier, Slab,
+# Crawlspace, Solid wall, etc.) has no basement, so the WFP Basement
+# retrofit is physically meaningless for it. Stored as a set so the
+# applicability check is a single membership test.
+_BASEMENT_FOUNDATION_CODES = {'B'}
+
+# DFE-status strings (lowercased + whitespace-stripped) that mean
+# "this building is already above design flood elevation". For such
+# buildings, the Elevate retrofit provides no further benefit — the
+# data generator typically encodes this as a no-op, but we drop the
+# row explicitly as a backstop so it doesn't slip through into hovers
+# or charts due to numerical drift.
+_ABOVE_DFE_STATUS_STRINGS = {'above dfe', 'above_dfe', 'abovedfe'}
+
+
+def retrofit_applies(action, foundation_type=None, dfe_status=None):
+    """Return True if `action` physically applies to a building with the
+    given foundation type / DFE status.
+
+    A retrofit that doesn't apply (e.g., wet-floodproofing a basement
+    that doesn't exist, or elevating a building that's already above
+    DFE) should not appear in the UI — its "damage" value is an
+    artifact of the math running regardless of whether the retrofit is
+    meaningful, and showing it as a $0 / -100% saving is actively
+    misleading.
+
+    Rules:
+      * 'WFP B' (Wet Floodproof Basement): requires foundation_type == 'B'.
+        Missing foundation type → conservatively excluded.
+      * 'Elevate': hidden for buildings already above DFE.
+        Missing DFE status → NOT hidden (we don't have grounds to drop it).
+      * Everything else ('No mitigation', 'Raise Utilities', 'WFP 1st'):
+        applies universally.
+    """
+    if action == 'WFP B':
+        if pd.isna(foundation_type):
+            return False
+        return str(foundation_type).strip().upper() in _BASEMENT_FOUNDATION_CODES
+    if action == 'Elevate':
+        if pd.isna(dfe_status):
+            return True
+        return str(dfe_status).strip().lower() not in _ABOVE_DFE_STATUS_STRINGS
+    return True
+
+
 def filter_by_occupancy(df, occupancy_selection):
     """Filter dataframe by occupancy type selection"""
     if df is None:
@@ -598,6 +644,67 @@ def load_bundle(data_folder, location_slug):
     # Merge attrs onto every (id, year, action, slr) row so each row carries
     # the descriptive context the Map / Details / Distributions tabs need.
     df_buildings = bldg_dmg.merge(bldg_attrs, on='id', how='left')
+
+    # ------------------------------------------------------------------
+    # Drop (building, action) rows for retrofits that don't physically
+    # apply to the building.
+    # ------------------------------------------------------------------
+    # The upstream damage generator runs the math for every retrofit on
+    # every building, regardless of whether the retrofit makes physical
+    # sense for that building (e.g., it computes WFP Basement damage for
+    # buildings with no basement, and Elevate damage for buildings
+    # already above DFE). Those numbers are then displayed as if they
+    # were real adaptation options, producing misleading entries like
+    # "WFP Basement: $0 (-100%)" on a manufactured home sitting on piers.
+    #
+    # We fix this at the data layer: any (building, action) row where
+    # the action doesn't physically apply is simply removed from
+    # df_buildings. That makes the action vanish from the hover, the
+    # map classification, the dropdowns, the box plots, the
+    # trajectories, and every aggregate downstream — one filter, one
+    # consistent story across the whole app. The wide-form pivot in
+    # prepare_map_data() will produce NaN for the dropped (building,
+    # action) cells, and the hover loop below skips NaN cells so
+    # they don't render as a misleading $0.
+    #
+    # Vectorized so this stays cheap on multi-thousand-building inventories.
+    if 'foundation_type' in df_buildings.columns:
+        _foundation_norm = (
+            df_buildings['foundation_type']
+            .fillna('').astype(str).str.strip().str.upper()
+        )
+        _is_basement = _foundation_norm.isin(_BASEMENT_FOUNDATION_CODES)
+        # Treat truly-missing foundation_type as "not basement" so we
+        # don't surface WFP B for buildings we can't verify have one.
+        _is_basement &= df_buildings['foundation_type'].notna()
+    else:
+        # No foundation column at all → no building can be confirmed as
+        # having a basement, so WFP B applies nowhere.
+        _is_basement = pd.Series(False, index=df_buildings.index)
+
+    if 'DFE_Status' in df_buildings.columns:
+        _dfe_norm = (
+            df_buildings['DFE_Status']
+            .fillna('').astype(str).str.strip().str.lower()
+        )
+        _is_above_dfe = _dfe_norm.isin(_ABOVE_DFE_STATUS_STRINGS)
+    else:
+        _is_above_dfe = pd.Series(False, index=df_buildings.index)
+
+    _action = df_buildings['Action']
+    _keep = pd.Series(True, index=df_buildings.index)
+    _keep &= ~((_action == 'WFP B')   & ~_is_basement)
+    _keep &= ~((_action == 'Elevate') &  _is_above_dfe)
+
+    _n_dropped_wfpb = int(((_action == 'WFP B')   & ~_is_basement).sum())
+    _n_dropped_elev = int(((_action == 'Elevate') &  _is_above_dfe).sum())
+    df_buildings = df_buildings[_keep].copy()
+    # Stash counts on the loader so the UI can report them if useful.
+    # (Not currently surfaced, but cheap to keep available.)
+    _applicability_drop_counts = {
+        'WFP B (no basement)':   _n_dropped_wfpb,
+        'Elevate (above DFE)':   _n_dropped_elev,
+    }
 
     # 6. Aggregate community-total damage tables per occupancy filter.
     #
@@ -2714,7 +2821,18 @@ def main():
                         for col in action_cols_p50:
                             action_name = col.replace('_P50', '')
                             val = row.get(col, 0)
-                            
+
+                            # Skip retrofits that don't physically apply to this
+                            # building. Those rows were dropped in load_bundle's
+                            # applicability filter, which means the wide-form
+                            # pivot in prepare_map_data() left this cell NaN.
+                            # Rendering a NaN here would either show "$nan" or,
+                            # via the format_currency rounding, a misleading $0.
+                            # Skipping the line entirely is what "hide it
+                            # completely" actually looks like in the hover.
+                            if action_name != 'No mitigation' and pd.isna(val):
+                                continue
+
                             display_name = action_name
                             if action_name == 'WFP B':
                                 display_name = 'WFP Basement'
