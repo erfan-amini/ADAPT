@@ -1840,7 +1840,9 @@ def main():
         st.divider()
         st.header("🎛️ Scenario Filters")
         
-        available_years = [2040, 2055, 2100]
+        # Fallback horizon set used only when no data is loaded yet; the
+        # real options come from the bundle's TargetYear values just below.
+        available_years = [2040, 2055, 2060, 2100]
         if df_buildings is not None and 'TargetYear' in df_buildings.columns:
             available_years = sorted(df_buildings['TargetYear'].unique())
         elif df_agg_raw is not None and 'TargetYear' in df_agg_raw.columns:
@@ -3358,7 +3360,7 @@ def main():
                                     "snapped to nice rounded values "
                                     f"({', '.join(fmt_money_short(b) for b in breaks)}). "
                                     "Bins stay constant when you change the year (so the same building "
-                                    "keeps the same color across 2040 / 2055 / 2100), but recompute when "
+                                    "keeps the same color across 2040 / 2055 / 2060 / 2100), but recompute when "
                                     "you switch SLR scenario. Buildings with no damage (≤ $1k) are shown in green."
                                 )
                             
@@ -5173,7 +5175,7 @@ def main():
                             st.caption(
                                 "Same building, same metrics as above, broken out by planning horizon "
                                 f"under the **{scenario_label}** scenario. Use this to compare how a "
-                                "given strategy performs in 2040 vs 2055 vs 2100 — and how its benefit "
+                                "given strategy performs in 2040 vs 2055 vs 2060 vs 2100 — and how its benefit "
                                 "and remaining damage evolve as sea level rises."
                             )
         else:
