@@ -12,6 +12,7 @@ import plotly.graph_objects as go
 import os
 import glob
 import openpyxl
+import flood_dem as fdem
 
 # ============================================================================
 # PAGE CONFIGURATION
@@ -536,6 +537,12 @@ def _bundle_wl_percentiles_from_mc(wl_mc):
     for p in [1,2,3,4,5,6,7,8,9,10,25,50,75,90,91,92,93,94,95,96,97,98,99]:
         out[f'P{p:02d}'] = np.percentile(arr, p, axis=1)
     return out
+
+
+@st.cache_data(show_spinner=False)
+def _cached_dem_roi(bbox, res_m):
+    """Cache wrapper around flood_dem.read_dem_roi (keyed on rounded bbox)."""
+    return fdem.read_dem_roi(bbox, res_m)
 
 
 @st.cache_data(show_spinner=False)
@@ -2054,14 +2061,194 @@ def main():
     # MAIN CONTENT - TABS
     # ========================================================================
     
-    tab1, tab_dist, tab2, tab3, tab4 = st.tabs([
+    tab1, tab_dist, tab2, tab3, tab4, tab_flood = st.tabs([
         "📊 Summary",
         "📦 Distributions",
         "🗺️ Map",
         "🏠 Details",
         "📈 Trends",
+        "🌊 Flood Maps",
     ])
-    
+
+    # ========================================================================
+    # TAB: FLOOD MAPS — bathtub inundation for user-specified water levels
+    # ========================================================================
+    with tab_flood:
+        st.markdown(
+            '<p class="tab-description">Bathtub flood-inundation maps for water levels you specify. '
+            'Enter present-day flood levels (ft NAVD88); the app adds projected sea-level rise for each '
+            'planning horizon and maps the resulting inundation depth. Terrain is the USGS 3DEP 1/3 arc-second '
+            '(~10&nbsp;m) DEM, read on demand for this area only.</p>',
+            unsafe_allow_html=True,
+        )
+
+        _fl_ok = (selected_location in data_store and df_buildings is not None)
+        _has_xy = (
+            df_buildings is not None
+            and {'longitude', 'latitude'}.issubset(df_buildings.columns)
+            and df_buildings['latitude'].notna().any()
+            and df_buildings['longitude'].notna().any()
+        )
+
+        try:
+            import rasterio as _rio  # noqa: F401
+            _rio_ok = True
+        except Exception:
+            _rio_ok = False
+
+        if not _fl_ok:
+            st.info("Select a location with building data to generate flood maps.")
+        elif not _has_xy:
+            st.warning("This location has no per-building coordinates, so the map extent can't be determined.")
+        elif not _rio_ok:
+            st.error(
+                "Flood maps need the **rasterio** package to read the terrain. "
+                "Add `rasterio` to the app's requirements.txt and redeploy."
+            )
+        else:
+            _wl = loc_entry.get('water_levels', {}) if loc_entry else {}
+            _pct_df = _wl.get(scenario)
+            if _pct_df is not None and not _pct_df.empty:
+                _base_year = int(_pct_df['Year'].min())
+            else:
+                _base_year = 2025
+
+            def _lvl(year, col):
+                if _pct_df is None or _pct_df.empty or col not in _pct_df.columns:
+                    return None
+                i = (_pct_df['Year'] - year).abs().idxmin()
+                return float(_pct_df.loc[i, col])
+
+            def _slr(year):
+                a, b = _lvl(year, 'P50'), _lvl(_base_year, 'P50')
+                return (a - b) if (a is not None and b is not None) else 0.0
+
+            _pf = {
+                'annual': _lvl(_base_year, 'P50'),
+                'ten':    _lvl(_base_year, 'P90'),
+                'one':    _lvl(_base_year, 'P99'),
+            }
+            if _pct_df is None or _pct_df.empty:
+                st.warning(
+                    "No Monte-Carlo water-level data found for this location, so the three "
+                    "flood types aren't prefilled and sea-level rise can't be derived "
+                    "(future levels will equal the values you enter). You can still enter levels manually."
+                )
+
+            st.markdown(
+                f"**Present-day base levels** (ft NAVD88). The first three are prefilled from the "
+                f"{_base_year} water-level percentiles for the **{scenario}** scenario; edit or untick any row. "
+                f"High-tide and monthly flooding are optional — tick and enter a level to include them."
+            )
+
+            _defs = [
+                ("Annual flood",            _pf['annual'], _pf['annual'] is not None,
+                 "≈ the level reached most years (50th-percentile annual maximum)."),
+                ("10% annual-chance flood", _pf['ten'],    _pf['ten'] is not None,
+                 "1-in-10-year level (90th-percentile annual maximum)."),
+                ("1% annual-chance flood",  _pf['one'],    _pf['one'] is not None,
+                 "1-in-100-year level (99th-percentile annual maximum)."),
+                ("High-tide flood",         None,          False,
+                 "Optional. e.g. the local NOAA minor/nuisance-flood threshold, ft NAVD88."),
+                ("Monthly flood",           None,          False,
+                 "Optional. A level reached roughly monthly, ft NAVD88."),
+            ]
+
+            _rows = []
+            for _i, (_lbl, _val, _on, _help) in enumerate(_defs):
+                _c0, _c1 = st.columns([0.34, 0.66])
+                _inc = _c0.checkbox(_lbl, value=_on, key=f"fld_inc_{_i}", help=_help)
+                _default = float(_val) if _val is not None else 0.0
+                _lv = _c1.number_input(
+                    f"{_lbl} level (ft NAVD88)", value=_default, step=0.5, format="%.2f",
+                    key=f"fld_val_{_i}", label_visibility="collapsed",
+                )
+                if _inc:
+                    _rows.append((_lbl, float(_lv)))
+
+            _years_sel = st.multiselect(
+                "Planning horizons", options=available_years, default=available_years,
+                format_func=lambda y: str(int(y)),
+            )
+            st.caption(
+                f"Sea-level-rise scenario follows the sidebar selection (**{scenario}**). SLR for each horizon "
+                f"is the rise in the median annual-maximum water level from {_base_year} to that year."
+            )
+
+            if not _rows:
+                st.info("Tick at least one flood level to generate maps.")
+            elif not _years_sel:
+                st.info("Select at least one planning horizon.")
+            elif st.button("🌊 Generate flood maps", type="primary"):
+                try:
+                    _bbox = fdem.roi_from_lonlat(
+                        df_buildings['longitude'].to_numpy(),
+                        df_buildings['latitude'].to_numpy(), buffer_m=500.0,
+                    )
+                    _bbox_r = tuple(round(v, 5) for v in _bbox)
+                except Exception as _e:
+                    st.error(f"Could not determine the map area: {_e}")
+                    _bbox_r = None
+
+                _Zm = None
+                if _bbox_r is not None:
+                    with st.spinner("Fetching terrain (USGS 3DEP) and computing inundation…"):
+                        try:
+                            _Zm, _ext = _cached_dem_roi(_bbox_r, 10.0)
+                        except Exception as _e:
+                            st.error(
+                                "Could not load terrain for this area from USGS 3DEP. "
+                                "This needs internet access at runtime. Details: %s" % _e
+                            )
+
+                if _Zm is not None:
+                    st.markdown(fdem.legend_html(), unsafe_allow_html=True)
+                    _zoom = fdem.mapbox_zoom_for_bbox(_ext)
+                    _clat = 0.5 * (_ext[1] + _ext[3])
+                    _clon = 0.5 * (_ext[0] + _ext[2])
+                    _coords = [[_ext[0], _ext[3]], [_ext[2], _ext[3]],
+                               [_ext[2], _ext[1]], [_ext[0], _ext[1]]]
+
+                    _cols = st.columns(2)
+                    _k = 0
+                    for _lbl, _base_lv in _rows:
+                        for _yr in _years_sel:
+                            _wl_ft = _base_lv + _slr(_yr)
+                            _depth = fdem.bathtub_depth_ft(_Zm, _wl_ft)
+                            _uri = fdem.depth_to_rgba_data_uri(_depth)
+                            _fig = go.Figure(go.Scattermapbox(
+                                lat=[_clat], lon=[_clon],
+                                marker=dict(size=0, opacity=0),
+                                hoverinfo='skip', showlegend=False,
+                            ))
+                            _fig.update_layout(
+                                mapbox=dict(
+                                    style="carto-positron",
+                                    center=dict(lat=_clat, lon=_clon),
+                                    zoom=_zoom,
+                                    layers=[dict(
+                                        sourcetype="image", source=_uri,
+                                        coordinates=_coords, below="traces", opacity=0.85,
+                                    )],
+                                ),
+                                margin=dict(l=0, r=0, t=30, b=0),
+                                height=360,
+                                title=dict(
+                                    text=(f"{_lbl} — {int(_yr)}"
+                                          f"<br><sub>Water level ≈ {_wl_ft:.2f} ft NAVD88 "
+                                          f"({scenario})</sub>"),
+                                    x=0.01, font=dict(size=12),
+                                ),
+                            )
+                            _cols[_k % 2].plotly_chart(_fig, use_container_width=True)
+                            _k += 1
+
+                    st.caption(
+                        "Bathtub model (no hydraulic connectivity). Terrain: USGS 3DEP 1/3 arc-second, "
+                        "public domain. Basemap © OpenStreetMap contributors • © CARTO. 3DEP is bare-earth "
+                        "land elevation, so open water is shown as transparent (Z ≤ 0)."
+                    )
+
     # ========================================================================
     # TAB: PER-BUILDING ANALYSIS — cross-building distributions + Plots 3/4/5
     # ========================================================================

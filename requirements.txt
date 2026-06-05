@@ -5,3 +5,4 @@ plotly
 openpyxl
 python-calamine
 kaleido
+rasterio
