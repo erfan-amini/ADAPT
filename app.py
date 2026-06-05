@@ -2588,12 +2588,12 @@ def main():
     
     tab2, tab1, tab_dist, tab3, tab_depth, tab_flood, tab_roads = st.tabs([
         "🗺️ Map",
-        "📊 Summary & Trends",
+        "📊 Overview",
         "📦 Distributions",
-        "🏠 Example RES",
-        "🏢 Example non-RES",
-        "🌊 Flood Maps",
-        "🛣️ Flooded Roads",
+        "🏠 RES",
+        "🏢 Non-RES",
+        "🌊 Flood maps",
+        "🛣️ Flooded roads",
     ])
 
     # ========================================================================
@@ -3217,7 +3217,7 @@ def main():
             if not _bdrows:
                 st.info("Tick at least one flood condition.")
             else:
-                _years = list(available_years)
+                _years = sorted(set([2026] + [int(y) for y in available_years]))
 
                 def _ftin(v):
                     if v is None or not np.isfinite(v):
@@ -5180,9 +5180,15 @@ def main():
         if df_agg is not None:
             st.subheader(f"Community-Wide Damage Summary — {location_name} ({occupancy_label}) — {target_year}, {scenario}")
             
-            df_current = df_agg[
-                (df_agg['TargetYear'] == target_year) & 
-                (df_agg['SLR'] == scenario)
+            # In the community summary, hide the WFP First-floor strategy for
+            # Pamunkey (manufactured-/single-story-dominant, so first-floor wet
+            # floodproofing isn't a meaningful community-wide option there).
+            _sum_agg = (df_agg[df_agg['Action'] != 'WFP 1st']
+                        if selected_location == "Pamunkey" else df_agg)
+
+            df_current = _sum_agg[
+                (_sum_agg['TargetYear'] == target_year) & 
+                (_sum_agg['SLR'] == scenario)
             ]
             
             col1, col2, col3, col4 = st.columns(4)
@@ -5227,7 +5233,7 @@ def main():
                 unsafe_allow_html=True,
             )
             
-            df_year_agg = df_agg[df_agg['TargetYear'] == target_year].copy()
+            df_year_agg = _sum_agg[_sum_agg['TargetYear'] == target_year].copy()
             
             if df_year_agg.empty:
                 st.info(f"No aggregated data for year {target_year}.")
@@ -5495,9 +5501,9 @@ def main():
                 'Elevate':         '#22c55e',   # green
             }
             
-            df_timeline = df_agg[
-                (df_agg['SLR'] == scenario) &
-                (df_agg['Action'].isin(traj_action_order))
+            df_timeline = _sum_agg[
+                (_sum_agg['SLR'] == scenario) &
+                (_sum_agg['Action'].isin(traj_action_order))
             ].copy()
             # Apply the consistent action labels so the legend reads cleanly
             df_timeline['Strategy'] = df_timeline['Action'].map(traj_action_labels)
@@ -5836,12 +5842,21 @@ def main():
                         "computed directly from the 1,000-realization Monte Carlo ensemble."
                     )
                     
-                    # Available years from the per-building damage table.
-                    # We use df_building (defined above) rather than df_traj
-                    # (which is defined later in the trajectory section);
-                    # both have the same TargetYear values, but df_traj
-                    # isn't in scope here.
-                    target_years_local = sorted(df_building['TargetYear'].unique())
+                    # Available years from the per-building damage table, plus
+                    # the present-day baseline (the MC sheets' 2025 base year)
+                    # prepended so the panel leads with current conditions.
+                    # df_building drops the baseline, so we read it from the MC
+                    # 'Year' column directly.
+                    _exp_mc_years = set()
+                    for _k in ('50th-percentile', '90th-percentile'):
+                        _m = wl_data.get(f'{_k}_mc')
+                        if _m is not None and 'Year' in _m.columns:
+                            _exp_mc_years |= set(int(v) for v in _m['Year'].unique())
+                    _dmg_years = [int(y) for y in df_building['TargetYear'].unique()]
+                    _present_y = min(_exp_mc_years) if _exp_mc_years else None
+                    target_years_local = sorted(_dmg_years)
+                    if _present_y is not None and _present_y not in _dmg_years:
+                        target_years_local = [_present_y] + target_years_local
                     
                     exp_rows = []
                     for slr_key, slr_label in (('50th-percentile', 'Median SLR (P50)'),
@@ -5863,9 +5878,11 @@ def main():
                             p_ffe = float((arr >= ffe_val).sum()) / n
                             p_bfe = (float((arr >= bfe_local).sum()) / n
                                      if bfe_local is not None else float('nan'))
-                            # Plain integer year; the 2025 baseline used to
-                            # render as 'Potential' but a bare year is clearer.
-                            label = str(int(yr))
+                            # Present-day baseline is shown as "2026" to match
+                            # the present column used in the other tabs.
+                            label = ("2026" if (_present_y is not None
+                                                and int(yr) == _present_y)
+                                     else str(int(yr)))
                             exp_rows.append({
                                 'SLR Scenario':         slr_label,
                                 'Year':                 label,
@@ -5905,7 +5922,16 @@ def main():
                 # Negative values are clipped to zero (site stays dry).
                 ground_elev = building_info.get('ground_elevation')
                 mc_for_scenario = wl_data.get(f'{scenario}_mc')
-                target_years_local = sorted(df_building['TargetYear'].unique())
+                # Prepend the present-day baseline (MC sheets' 2025 base year,
+                # displayed as "2026") so the table leads with current conditions.
+                _present_y2 = (int(mc_for_scenario['Year'].min())
+                               if (mc_for_scenario is not None
+                                   and 'Year' in mc_for_scenario.columns
+                                   and len(mc_for_scenario)) else None)
+                _dmg_years2 = [int(y) for y in df_building['TargetYear'].unique()]
+                target_years_local = sorted(_dmg_years2)
+                if _present_y2 is not None and _present_y2 not in _dmg_years2:
+                    target_years_local = [_present_y2] + target_years_local
                 if (pd.notna(ground_elev)
                         and mc_for_scenario is not None
                         and 'Year' in mc_for_scenario.columns
@@ -5943,11 +5969,12 @@ def main():
                         arr = yr_mc[mc_cols_fd].to_numpy(dtype=float).flatten()
                         if arr.size == 0:
                             continue
-                        # Plain integer year for the row label. The bundle
-                        # ships a 'Potential' label for the 2025 baseline,
-                        # but the bare year is less ambiguous to readers.
+                        # Present-day baseline row is shown as "2026" to match
+                        # the present column used in the other tabs.
                         yr_int = int(yr)
-                        year_display = str(yr_int)
+                        year_display = ("2026" if (_present_y2 is not None
+                                                   and yr_int == _present_y2)
+                                        else str(yr_int))
                         row = {'Year': year_display}
                         for col_label, pct in pct_specs:
                             wl = float(np.percentile(arr, pct))
