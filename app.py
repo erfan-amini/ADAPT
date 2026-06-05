@@ -12,7 +12,8 @@ import plotly.graph_objects as go
 import os
 import glob
 import openpyxl
-import flood_dem as fdem
+import math
+from types import SimpleNamespace
 
 # ============================================================================
 # PAGE CONFIGURATION
@@ -539,9 +540,215 @@ def _bundle_wl_percentiles_from_mc(wl_mc):
     return out
 
 
+# ============================================================================
+# FLOOD-MAP (BATHTUB) SUPPORT — inlined so the app is a single file.
+# Terrain: USGS 3DEP 1/3 arc-second (~10 m), public-domain NAVD88 metres,
+# Cloud-Optimized GeoTIFFs on AWS `prd-tnm`; only the ROI window is read via
+# GDAL /vsicurl HTTP range requests. Bathtub model (no hydraulic connectivity).
+# To use a self-hosted topobathy COG instead, set DEM_COG_OVERRIDE_URL.
+# ============================================================================
+DEM_COG_URL_TEMPLATE = (
+    "https://prd-tnm.s3.amazonaws.com/StagedProducts/Elevation/13/TIFF/"
+    "current/{tile}/USGS_13_{tile}.tif"
+)
+DEM_COG_OVERRIDE_URL = None
+FT_PER_M = 1.0 / 0.3048
+WS_BINS_FT = [0, 1, 2, 3, 4, 5, 6]
+WS_COLORS = [
+    (74, 0, 130), (31, 143, 255), (0, 204, 204),
+    (255, 235, 0), (255, 140, 0), (191, 13, 13),
+]
+
+
+def dem_tiles_for_bbox(bbox):
+    """3DEP 1-degree tile name(s) covering a lon/lat bbox (lon negative).
+    Tile `nA wB` covers latitude [A-1, A], longitude [-B, -(B-1)]."""
+    lon_min, lat_min, lon_max, lat_max = bbox
+    a_min = int(math.floor(lat_min)) + 1
+    a_max = int(math.ceil(lat_max))
+    b_min = int(math.floor(-lon_max)) + 1
+    b_max = int(math.ceil(-lon_min))
+    return [f"n{a:02d}w{b:03d}" for a in range(a_min, a_max + 1)
+            for b in range(b_min, b_max + 1)]
+
+
+def roi_from_lonlat(lon, lat, buffer_m=600.0, min_span_km=1.5, max_span_km=25.0):
+    """Robust bbox: median-centred, MAD outlier rejection, clamped span."""
+    lon = np.asarray(lon, dtype=float)
+    lat = np.asarray(lat, dtype=float)
+    m = np.isfinite(lon) & np.isfinite(lat)
+    lon, lat = lon[m], lat[m]
+    if lon.size == 0:
+        raise ValueError("No finite coordinates to build a region of interest.")
+    clon = float(np.median(lon))
+    clat = float(np.median(lat))
+    m_per_lat = 111320.0
+    m_per_lon = 111320.0 * max(0.1, math.cos(math.radians(clat)))
+    dx = (lon - clon) * m_per_lon
+    dy = (lat - clat) * m_per_lat
+    dist = np.hypot(dx, dy)
+    med = float(np.median(dist))
+    mad = float(np.median(np.abs(dist - med)))
+    thr = max(med + 5.0 * 1.4826 * mad, 2000.0)
+    keep = dist <= thr
+    if not keep.any():
+        keep = np.ones_like(dist, dtype=bool)
+    lon_k, lat_k = lon[keep], lat[keep]
+    half_lo = 500.0 * min_span_km
+    half_hi = 500.0 * max_span_km
+    hx_m = min(max((lon_k.max() - lon_k.min()) * 0.5 * m_per_lon + buffer_m, half_lo), half_hi)
+    hy_m = min(max((lat_k.max() - lat_k.min()) * 0.5 * m_per_lat + buffer_m, half_lo), half_hi)
+    dlon = hx_m / m_per_lon
+    dlat = hy_m / m_per_lat
+    return (clon - dlon, clat - dlat, clon + dlon, clat + dlat)
+
+
+def maybe_swap_lonlat(lon, lat):
+    """Swap if columns look transposed (US lon ~-65..-125, lat ~20..50)."""
+    lon = np.asarray(lon, dtype=float)
+    lat = np.asarray(lat, dtype=float)
+    mlon = np.nanmedian(np.abs(lon))
+    mlat = np.nanmedian(np.abs(lat))
+    if np.isfinite(mlon) and np.isfinite(mlat) and mlon < 60.0 and mlat > 60.0:
+        return lat, lon, True
+    return lon, lat, False
+
+
+def read_dem_roi(bbox, target_res_m=10.0):
+    """Read the DEM over `bbox` onto a regular lon/lat grid (~target_res_m),
+    fetching only the ROI window from remote COG(s) via GDAL /vsicurl.
+    Returns (Z_m [row 0 = north, metres NAVD88, NaN=NoData], extent)."""
+    lon_min, lat_min, lon_max, lat_max = bbox
+    import rasterio
+    from rasterio.vrt import WarpedVRT
+    from rasterio.enums import Resampling
+    from rasterio.transform import from_bounds as transform_from_bounds
+
+    latc = 0.5 * (lat_min + lat_max)
+    dlat = target_res_m / 111320.0
+    dlon = target_res_m / (111320.0 * max(0.1, math.cos(math.radians(latc))))
+    nlon = max(2, int(round((lon_max - lon_min) / dlon)))
+    nlat = max(2, int(round((lat_max - lat_min) / dlat)))
+    longest = max(nlon, nlat)
+    if longest > 2500:
+        shrink = longest / 2500.0
+        nlon = max(2, int(nlon / shrink))
+        nlat = max(2, int(nlat / shrink))
+
+    dst_transform = transform_from_bounds(lon_min, lat_min, lon_max, lat_max, nlon, nlat)
+    dst = np.full((nlat, nlon), np.nan, dtype="float32")
+    if DEM_COG_OVERRIDE_URL:
+        urls = [DEM_COG_OVERRIDE_URL]
+    else:
+        urls = [DEM_COG_URL_TEMPLATE.format(tile=t) for t in dem_tiles_for_bbox(bbox)]
+
+    env = rasterio.Env(
+        GDAL_DISABLE_READDIR_ON_OPEN="EMPTY_DIR",
+        CPL_VSIL_CURL_ALLOWED_EXTENSIONS=".tif",
+        GDAL_HTTP_MULTIPLEX="YES",
+        VSI_CACHE="TRUE",
+    )
+    any_ok = False
+    errors = []
+    with env:
+        for url in urls:
+            vsi = url if url.startswith("/vsicurl/") else "/vsicurl/" + url
+            try:
+                with rasterio.open(vsi) as src:
+                    src_nodata = src.nodata
+                    with WarpedVRT(src, crs="EPSG:4326", transform=dst_transform,
+                                   width=nlon, height=nlat,
+                                   resampling=Resampling.bilinear) as vrt:
+                        arr = vrt.read(1).astype("float32")
+                if src_nodata is not None:
+                    arr[arr == src_nodata] = np.nan
+                arr[arr <= -500.0] = np.nan
+                fill = np.isnan(dst) & np.isfinite(arr)
+                dst[fill] = arr[fill]
+                any_ok = True
+            except Exception as exc:                # noqa: BLE001
+                errors.append(f"{vsi.split('/')[-1]}: {exc}")
+    if not any_ok:
+        raise RuntimeError(
+            "Could not read any DEM tile for this area. Tried: %s. Errors: %s"
+            % (", ".join(u.split("/")[-1] for u in urls), " | ".join(errors))
+        )
+    return dst, (lon_min, lat_min, lon_max, lat_max)
+
+
+def bathtub_depth_ft(Z_m, wl_ft):
+    """Bathtub depth (ft) for a water level (ft NAVD88); NaN where dry/water."""
+    wl_m = float(wl_ft) * 0.3048
+    depth_m = wl_m - Z_m
+    invalid = ~np.isfinite(Z_m) | (Z_m <= 0.0)
+    depth_m = np.where(invalid, np.nan, depth_m)
+    depth_m = np.where(depth_m < 0.0, np.nan, depth_m)
+    return depth_m.astype("float32") * FT_PER_M
+
+
+def depth_to_rgba_data_uri(depth_ft):
+    """Depth-in-feet array -> base64 PNG data URI (RGBA, discrete bins)."""
+    from PIL import Image
+    import io
+    import base64
+    h, w = depth_ft.shape
+    rgba = np.zeros((h, w, 4), dtype=np.uint8)
+    n = len(WS_COLORS)
+    for b, (r, g, bl) in enumerate(WS_COLORS):
+        if b < n - 1:
+            mm = (depth_ft >= WS_BINS_FT[b]) & (depth_ft < WS_BINS_FT[b + 1])
+        else:
+            mm = depth_ft >= WS_BINS_FT[b]
+        rgba[mm, 0] = r
+        rgba[mm, 1] = g
+        rgba[mm, 2] = bl
+        rgba[mm, 3] = 255
+    buf = io.BytesIO()
+    Image.fromarray(rgba, "RGBA").save(buf, format="PNG")
+    return "data:image/png;base64," + base64.b64encode(buf.getvalue()).decode("ascii")
+
+
+def mapbox_zoom_for_bbox(extent, width_px=700, height_px=360, pad=1.12):
+    """Approximate Plotly mapbox zoom framing the bbox (fits tighter span)."""
+    lon_min, lat_min, lon_max, lat_max = extent
+    lon_span = max((lon_max - lon_min) * pad, 1e-4)
+    lat_span = max((lat_max - lat_min) * pad, 1e-4)
+    z_lon = math.log2(360.0 / lon_span) + math.log2(max(width_px, 1) / 512.0)
+    z_lat = math.log2(180.0 / lat_span) + math.log2(max(height_px, 1) / 512.0)
+    return max(1.0, min(15.0, min(z_lon, z_lat)))
+
+
+def legend_html():
+    """Inline HTML legend for the discrete depth bins (feet)."""
+    labels = ["0–1", "1–2", "2–3", "3–4", "4–5", "5+"]
+    items = []
+    for (r, g, b), lab in zip(WS_COLORS, labels):
+        items.append(
+            f'<span style="display:inline-flex;align-items:center;margin-right:14px;">'
+            f'<span style="width:14px;height:14px;background:rgb({r},{g},{b});'
+            f'display:inline-block;margin-right:5px;border:1px solid #999;"></span>'
+            f'{lab} ft</span>'
+        )
+    return ('<div style="font-size:0.85rem;color:#334155;margin:0.25rem 0 0.5rem;">'
+            '<b>Flood depth</b>&nbsp;&nbsp;' + "".join(items) + "</div>")
+
+
+# Namespace so the Flood Maps tab can keep calling fdem.<fn>(...).
+fdem = SimpleNamespace(
+    dem_tiles_for_bbox=dem_tiles_for_bbox,
+    roi_from_lonlat=roi_from_lonlat,
+    maybe_swap_lonlat=maybe_swap_lonlat,
+    read_dem_roi=read_dem_roi,
+    bathtub_depth_ft=bathtub_depth_ft,
+    depth_to_rgba_data_uri=depth_to_rgba_data_uri,
+    mapbox_zoom_for_bbox=mapbox_zoom_for_bbox,
+    legend_html=legend_html,
+)
+
+
 @st.cache_data(show_spinner=False)
 def _cached_dem_roi(bbox, res_m):
-    """Cache wrapper around flood_dem.read_dem_roi (keyed on rounded bbox)."""
+    """Cache wrapper around read_dem_roi (keyed on rounded bbox)."""
     return fdem.read_dem_roi(bbox, res_m)
 
 
@@ -2096,14 +2303,6 @@ def main():
         except Exception:
             _rio_ok = False
 
-        # Guard against a stale flood_dem.py (app.py and flood_dem.py must be
-        # deployed together). A missing function would otherwise crash with a
-        # cryptic AttributeError.
-        _fdem_fns = ('maybe_swap_lonlat', 'roi_from_lonlat', 'read_dem_roi',
-                     'bathtub_depth_ft', 'depth_to_rgba_data_uri',
-                     'mapbox_zoom_for_bbox', 'legend_html')
-        _fdem_ok = all(hasattr(fdem, _fn) for _fn in _fdem_fns)
-
         if not _fl_ok:
             st.info("Select a location with building data to generate flood maps.")
         elif not _has_xy:
@@ -2112,14 +2311,6 @@ def main():
             st.error(
                 "Flood maps need the **rasterio** package to read the terrain. "
                 "Add `rasterio` to the app's requirements.txt and redeploy."
-            )
-        elif not _fdem_ok:
-            _missing = [_fn for _fn in _fdem_fns if not hasattr(fdem, _fn)]
-            st.error(
-                "`flood_dem.py` is out of date — it's missing: "
-                + ", ".join(f"`{m}`" for m in _missing)
-                + ". Replace `flood_dem.py` in the repo with the version that matches "
-                "this `app.py` (they ship together), commit, and reboot the app."
             )
         else:
             _wl = loc_entry.get('water_levels', {}) if loc_entry else {}
