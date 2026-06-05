@@ -2096,6 +2096,14 @@ def main():
         except Exception:
             _rio_ok = False
 
+        # Guard against a stale flood_dem.py (app.py and flood_dem.py must be
+        # deployed together). A missing function would otherwise crash with a
+        # cryptic AttributeError.
+        _fdem_fns = ('maybe_swap_lonlat', 'roi_from_lonlat', 'read_dem_roi',
+                     'bathtub_depth_ft', 'depth_to_rgba_data_uri',
+                     'mapbox_zoom_for_bbox', 'legend_html')
+        _fdem_ok = all(hasattr(fdem, _fn) for _fn in _fdem_fns)
+
         if not _fl_ok:
             st.info("Select a location with building data to generate flood maps.")
         elif not _has_xy:
@@ -2104,6 +2112,14 @@ def main():
             st.error(
                 "Flood maps need the **rasterio** package to read the terrain. "
                 "Add `rasterio` to the app's requirements.txt and redeploy."
+            )
+        elif not _fdem_ok:
+            _missing = [_fn for _fn in _fdem_fns if not hasattr(fdem, _fn)]
+            st.error(
+                "`flood_dem.py` is out of date — it's missing: "
+                + ", ".join(f"`{m}`" for m in _missing)
+                + ". Replace `flood_dem.py` in the repo with the version that matches "
+                "this `app.py` (they ship together), commit, and reboot the app."
             )
         else:
             _wl = loc_entry.get('water_levels', {}) if loc_entry else {}
