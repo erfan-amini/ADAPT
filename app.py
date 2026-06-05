@@ -708,14 +708,18 @@ def depth_to_rgba_data_uri(depth_ft):
     return "data:image/png;base64," + base64.b64encode(buf.getvalue()).decode("ascii")
 
 
-def mapbox_zoom_for_bbox(extent, width_px=700, height_px=360, pad=1.12):
-    """Approximate Plotly mapbox zoom framing the bbox (fits tighter span)."""
+def mapbox_zoom_for_bbox(extent, width_px=340, height_px=420, pad=1.06):
+    """Approximate a Plotly mapbox zoom that frames the bbox in a grid panel.
+    Web-Mercator: world is square (360 deg per 512 px tile at z0); latitude
+    needs a cos(lat) term. width/height default to a 2-column panel."""
     lon_min, lat_min, lon_max, lat_max = extent
+    latc = 0.5 * (lat_min + lat_max)
     lon_span = max((lon_max - lon_min) * pad, 1e-4)
     lat_span = max((lat_max - lat_min) * pad, 1e-4)
     z_lon = math.log2(360.0 / lon_span) + math.log2(max(width_px, 1) / 512.0)
-    z_lat = math.log2(180.0 / lat_span) + math.log2(max(height_px, 1) / 512.0)
-    return max(1.0, min(15.0, min(z_lon, z_lat)))
+    z_lat = (math.log2(360.0 / lat_span) + math.log2(max(height_px, 1) / 512.0)
+             + math.log2(max(0.05, math.cos(math.radians(latc)))))
+    return max(1.0, min(16.0, min(z_lon, z_lat)))
 
 
 def legend_html():
@@ -2388,6 +2392,11 @@ def main():
                 "Planning horizons", options=available_years, default=available_years,
                 format_func=lambda y: str(int(y)),
             )
+            _zoom_boost = st.slider(
+                "Map zoom", min_value=-2.0, max_value=5.0, value=1.0, step=0.5,
+                help="Higher = more zoomed in. Maps are framed to the community by default; "
+                     "increase this to zoom closer.",
+            )
             st.caption(
                 f"A map is produced for every ticked level × horizon × scenario. For each scenario, SLR is "
                 f"the rise in the median annual-maximum water level from {_base_year} to that horizon."
@@ -2404,7 +2413,7 @@ def main():
                 _latA = df_buildings['latitude'].to_numpy(dtype=float)
                 _lonA, _latA, _swapped = fdem.maybe_swap_lonlat(_lonA, _latA)
                 try:
-                    _bbox = fdem.roi_from_lonlat(_lonA, _latA, buffer_m=600.0)
+                    _bbox = fdem.roi_from_lonlat(_lonA, _latA, buffer_m=350.0)
                     _bbox_r = tuple(round(v, 5) for v in _bbox)
                 except Exception as _e:
                     st.error(f"Could not determine the map area: {_e}")
@@ -2445,11 +2454,15 @@ def main():
 
                 if _Zm is not None and _ext is not None:
                     st.markdown(fdem.legend_html(), unsafe_allow_html=True)
-                    _zoom = fdem.mapbox_zoom_for_bbox(_ext)
+                    _zoom = fdem.mapbox_zoom_for_bbox(_ext) + _zoom_boost
                     _clat = 0.5 * (_ext[1] + _ext[3])
                     _clon = 0.5 * (_ext[0] + _ext[2])
                     _coords = [[_ext[0], _ext[3]], [_ext[2], _ext[3]],
                                [_ext[2], _ext[1]], [_ext[0], _ext[1]]]
+                    # Approx per-cell ground area (m²) for a flooded-area readout.
+                    _lat_m = (_ext[3] - _ext[1]) * 111320.0
+                    _lon_m = (_ext[2] - _ext[0]) * 111320.0 * math.cos(math.radians(_clat))
+                    _cell_m2 = (_lat_m / _Zm.shape[0]) * (_lon_m / _Zm.shape[1])
 
                     for _scn in _scn_sel:
                         st.markdown(f"##### {_scn_pretty(_scn)}")
@@ -2468,6 +2481,7 @@ def main():
                                     _k += 1
                                     continue
                                 _uri = fdem.depth_to_rgba_data_uri(_depth)
+                                _flood_km2 = float(np.isfinite(_depth).sum()) * _cell_m2 / 1e6
                                 _fig = go.Figure(go.Scattermapbox(
                                     lat=[_clat], lon=[_clon],
                                     marker=dict(size=0, opacity=0),
@@ -2483,11 +2497,12 @@ def main():
                                             coordinates=_coords, below="traces", opacity=0.85,
                                         )],
                                     ),
-                                    margin=dict(l=0, r=0, t=30, b=0),
-                                    height=360,
+                                    margin=dict(l=0, r=0, t=34, b=0),
+                                    height=420,
                                     title=dict(
                                         text=(f"{_lbl} — {int(_yr)}"
-                                              f"<br><sub>Water level ≈ {_wl_ft:.2f} ft NAVD88</sub>"),
+                                              f"<br><sub>Water level ≈ {_wl_ft:.2f} ft NAVD88  •  "
+                                              f"flooded land ≈ {_flood_km2:.2f} km²</sub>"),
                                         x=0.01, font=dict(size=12),
                                     ),
                                 )
