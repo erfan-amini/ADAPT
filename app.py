@@ -2477,32 +2477,48 @@ def main():
                 )
 
             st.markdown(
-                f"**Present-day base levels** (ft NAVD88) — the same for both SLR scenarios. The first three "
-                f"are prefilled from the {_base_year} water-level percentiles; edit or untick any row. "
-                f"High-tide and monthly flooding are optional — tick and enter a level to include them."
+                f"**Present-day base levels** (ft NAVD88) — the same for both SLR scenarios; future "
+                f"levels add each scenario's sea-level rise. Tick the levels to map and edit any value. "
+                f"Annual / 10% / 1% are prefilled from the {_base_year} water-level percentiles where available."
             )
 
-            _defs = [
-                ("Annual flood",            _pf['annual'], _pf['annual'] is not None,
-                 "≈ the level reached most years (50th-percentile annual maximum)."),
-                ("10% annual-chance flood", _pf['ten'],    _pf['ten'] is not None,
-                 "1-in-10-year level (90th-percentile annual maximum)."),
-                ("1% annual-chance flood",  _pf['one'],    _pf['one'] is not None,
-                 "1-in-100-year level (99th-percentile annual maximum)."),
-                ("High-tide flood",         None,          False,
-                 "Optional. e.g. the local NOAA minor/nuisance-flood threshold, ft NAVD88."),
-                ("Monthly flood",           None,          False,
-                 "Optional. A level reached roughly monthly, ft NAVD88."),
-            ]
+            _is_pamunkey = (selected_location == "Pamunkey")
+            if _is_pamunkey:
+                # Pamunkey: HTF / 10% / 1% are selected by default with project values.
+                _defs = [
+                    ("High-tide flood",         2.37,          True,
+                     "High-tide flooding (HTF) level, ft NAVD88."),
+                    ("Monthly flood",           None,          False,
+                     "Optional. A level reached roughly monthly, ft NAVD88."),
+                    ("Annual flood",            _pf['annual'], False,
+                     "≈ the level reached most years (50th-percentile annual maximum)."),
+                    ("10% annual-chance flood", 5.78,          True,
+                     "1-in-10-year level (90th-percentile annual maximum)."),
+                    ("1% annual-chance flood",  7.38,          True,
+                     "1-in-100-year level (99th-percentile annual maximum)."),
+                ]
+            else:
+                _defs = [
+                    ("High-tide flood",         None,          False,
+                     "Optional. e.g. the local NOAA minor/nuisance-flood threshold, ft NAVD88."),
+                    ("Monthly flood",           None,          False,
+                     "Optional. A level reached roughly monthly, ft NAVD88."),
+                    ("Annual flood",            _pf['annual'], _pf['annual'] is not None,
+                     "≈ the level reached most years (50th-percentile annual maximum)."),
+                    ("10% annual-chance flood", _pf['ten'],    _pf['ten'] is not None,
+                     "1-in-10-year level (90th-percentile annual maximum)."),
+                    ("1% annual-chance flood",  _pf['one'],    _pf['one'] is not None,
+                     "1-in-100-year level (99th-percentile annual maximum)."),
+                ]
 
             _rows = []
             for _i, (_lbl, _val, _on, _help) in enumerate(_defs):
                 _c0, _c1 = st.columns([0.34, 0.66])
-                _inc = _c0.checkbox(_lbl, value=_on, key=f"fld_inc_{_i}", help=_help)
+                _inc = _c0.checkbox(_lbl, value=_on, key=f"fld_inc_{_lbl}", help=_help)
                 _default = float(_val) if _val is not None else 0.0
                 _lv = _c1.number_input(
                     f"{_lbl} level (ft NAVD88)", value=_default, step=0.5, format="%.2f",
-                    key=f"fld_val_{_i}", label_visibility="collapsed",
+                    key=f"fld_val_{_lbl}", label_visibility="collapsed",
                 )
                 if _inc:
                     _rows.append((_lbl, float(_lv)))
