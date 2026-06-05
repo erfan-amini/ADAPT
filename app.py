@@ -558,6 +558,11 @@ WS_COLORS = [
     (74, 0, 130), (31, 143, 255), (0, 204, 204),
     (255, 235, 0), (255, 140, 0), (191, 13, 13),
 ]
+# Blue-only ramp (light = shallow → dark = deep) for the road-flooding maps.
+WS_COLORS_BLUE = [
+    (198, 219, 239), (158, 202, 225), (107, 174, 214),
+    (66, 146, 198), (33, 113, 181), (8, 69, 148),
+]
 
 
 def dem_tiles_for_bbox(bbox):
@@ -750,12 +755,14 @@ def legend_html(area_note=None):
     )
 
 
-def depth_to_rgba(depth_ft, alpha=217):
-    """Depth-in-feet array -> (H,W,4) uint8 RGBA (discrete bins; dry transparent)."""
+def depth_to_rgba(depth_ft, alpha=217, colors=None):
+    """Depth-in-feet array -> (H,W,4) uint8 RGBA (discrete bins; dry transparent).
+    `colors` defaults to the multi-hue ramp; pass WS_COLORS_BLUE for blue-only."""
+    cols = colors if colors is not None else WS_COLORS
     h, w = depth_ft.shape
     rgba = np.zeros((h, w, 4), dtype=np.uint8)
-    n = len(WS_COLORS)
-    for b, (r, g, bl) in enumerate(WS_COLORS):
+    n = len(cols)
+    for b, (r, g, bl) in enumerate(cols):
         if b < n - 1:
             mm = (depth_ft >= WS_BINS_FT[b]) & (depth_ft < WS_BINS_FT[b + 1])
         else:
@@ -845,7 +852,7 @@ def compose_flood_png(basemap_rgb, depth_ft):
     import io as _io
     from PIL import Image
     base = Image.fromarray(np.asarray(basemap_rgb, dtype=np.uint8), "RGB").convert("RGBA")
-    overlay = Image.fromarray(depth_to_rgba(depth_ft), "RGBA").resize(base.size, Image.NEAREST)
+    overlay = Image.fromarray(depth_to_rgba(depth_ft, alpha=150), "RGBA").resize(base.size, Image.NEAREST)
     out = Image.alpha_composite(base, overlay).convert("RGB")
     buf = _io.BytesIO()
     out.save(buf, format="PNG")
@@ -991,7 +998,7 @@ def compose_road_png(basemap_rgb, depth_ft, segments, ext):
     from PIL import Image, ImageDraw
     base = Image.fromarray(np.asarray(basemap_rgb, dtype=np.uint8), "RGB").convert("RGBA")
     W, H = base.size
-    overlay = Image.fromarray(depth_to_rgba(depth_ft, alpha=150), "RGBA").resize((W, H), Image.NEAREST)
+    overlay = Image.fromarray(depth_to_rgba(depth_ft, alpha=150, colors=WS_COLORS_BLUE), "RGBA").resize((W, H), Image.NEAREST)
     base = Image.alpha_composite(base, overlay)
     draw = ImageDraw.Draw(base)
     lon_min, lat_min, lon_max, lat_max = ext
@@ -3018,10 +3025,16 @@ def main():
                         '<div style="margin:0.5rem 0 0.8rem;padding:0.55rem 0.8rem;background:#f8fafc;'
                         'border:1px solid #e2e8f0;border-radius:8px;font-size:1.05rem;">'
                         '<b style="font-size:1.2rem;">Roads</b>&nbsp;&nbsp;'
-                        '<span style="color:#dc1414;font-weight:800;">━</span> flooded'
-                        '&nbsp;&nbsp;&nbsp;<span style="color:#ff8c00;font-weight:800;">━</span> proximate'
+                        '<span style="color:#dc1414;font-weight:800;">━</span> flooded (surface below the water level)'
+                        '&nbsp;&nbsp;&nbsp;<span style="color:#ff8c00;font-weight:800;">━</span> '
+                        f'proximate (dry but within {int(_rprox)} m of flooding)'
                         '&nbsp;&nbsp;&nbsp;<span style="color:#228b22;font-weight:800;">━</span> dry'
-                        '&nbsp;&nbsp;&nbsp;<span style="color:#3b6fb0;">▒▒</span> flood depth (blue shading)'
+                        '<br><b style="font-size:1.05rem;">Water</b>&nbsp;&nbsp;'
+                        '<span style="background:rgb(198,219,239);">&nbsp;&nbsp;</span>'
+                        '<span style="background:rgb(107,174,214);">&nbsp;&nbsp;</span>'
+                        '<span style="background:rgb(33,113,181);">&nbsp;&nbsp;</span>'
+                        '<span style="background:rgb(8,69,148);">&nbsp;&nbsp;</span>'
+                        '&nbsp; flood depth — light → dark blue = shallow → deep'
                         '</div>',
                         unsafe_allow_html=True,
                     )
