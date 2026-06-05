@@ -1219,6 +1219,15 @@ def load_bundle(data_folder, location_slug):
     _keep &= ~((_action == 'WFP B')   & ~_is_basement)
     _keep &= ~((_action == 'Elevate') &  _is_above_dfe)
 
+    # Manufactured-housing-dominant inventory (e.g., Pamunkey): if basements
+    # are essentially absent, drop Wet-Floodproof-Basement for the whole
+    # location so it never surfaces as an option anywhere.
+    _n_bldg_total = df_buildings['id'].nunique()
+    _n_basement_bldg = df_buildings.loc[_is_basement, 'id'].nunique()
+    _basement_share = (_n_basement_bldg / _n_bldg_total) if _n_bldg_total else 0.0
+    if _basement_share < 0.10:
+        _keep &= ~(_action == 'WFP B')
+
     _n_dropped_wfpb = int(((_action == 'WFP B')   & ~_is_basement).sum())
     _n_dropped_elev = int(((_action == 'Elevate') &  _is_above_dfe).sum())
     df_buildings = df_buildings[_keep].copy()
@@ -2577,15 +2586,14 @@ def main():
     # MAIN CONTENT - TABS
     # ========================================================================
     
-    tab1, tab_dist, tab2, tab3, tab4, tab_flood, tab_roads, tab_depth = st.tabs([
-        "📊 Summary",
-        "📦 Distributions",
+    tab2, tab1, tab_dist, tab3, tab_depth, tab_flood, tab_roads = st.tabs([
         "🗺️ Map",
-        "🏠 Details",
-        "📈 Trends",
+        "📊 Summary & Trends",
+        "📦 Distributions",
+        "🏠 Example RES",
+        "🏢 Example non-RES",
         "🌊 Flood Maps",
         "🛣️ Flooded Roads",
-        "🏢 Building Depth",
     ])
 
     # ========================================================================
@@ -2711,9 +2719,10 @@ def main():
             _scn_sel = _c_scn.multiselect(
                 "SLR scenarios", options=_scn_keys, default=_scn_keys, format_func=_scn_pretty,
             )
+            _map_years = sorted(set([2026] + [int(y) for y in available_years]))
             _years_sel = _c_yr.multiselect(
-                "Planning horizons", options=available_years, default=available_years,
-                format_func=lambda y: str(int(y)),
+                "Planning horizons", options=_map_years, default=_map_years,
+                format_func=lambda y: f"{int(y)} (present)" if int(y) == 2026 else str(int(y)),
             )
             _cz, _cd, _cb = st.columns([0.36, 0.32, 0.32])
             _zoom_factor = _cz.slider(
@@ -2951,9 +2960,11 @@ def main():
                 "SLR scenarios", options=_rscn_keys, default=_rscn_keys,
                 format_func=_rscn_pretty, key="rd_scn",
             )
+            _rmap_years = sorted(set([2026] + [int(y) for y in available_years]))
             _ryears_sel = _rc_yr.multiselect(
-                "Planning horizons", options=available_years, default=available_years,
-                format_func=lambda y: str(int(y)), key="rd_years",
+                "Planning horizons", options=_rmap_years, default=_rmap_years,
+                format_func=lambda y: f"{int(y)} (present)" if int(y) == 2026 else str(int(y)),
+                key="rd_years",
             )
             _rcz, _rcd, _rcb = st.columns([0.36, 0.32, 0.32])
             _rzoom = _rcz.slider(
@@ -3652,7 +3663,7 @@ def main():
                             f"Damaged buildings where Raise Utilities eliminates "
                             f"upper-tail damage by {target_year}",
                             _v4, _c4,
-                            x_left='Raise Utilities eliminates P90 damage',
+                            x_left='Raise Utilities',
                             single_group=True,
                         )
                     else:
@@ -3664,7 +3675,7 @@ def main():
                             f"Damaged buildings where WFP Basement eliminates "
                             f"upper-tail damage by {target_year}",
                             _v4, _c4,
-                            x_left='WFP Basement eliminates P90 damage',
+                            x_left='WFP Basement',
                             single_group=True,
                         )
                     
@@ -3676,7 +3687,7 @@ def main():
                         f"Damaged buildings where Elevation outperforms "
                         f"WFP Basement on P90 damage by {target_year}",
                         _v5, _c5,
-                        x_left='Elevation strictly beats WFP Basement on P90',
+                        x_left='Elevate',
                         single_group=True,
                     )
                     
@@ -4167,6 +4178,26 @@ def main():
                     center_lat = df_map['latitude'].mean()
                     center_lon = df_map['longitude'].mean()
 
+                    # Default zoom: frame the community tightly rather than the
+                    # old fixed wide zoom. Fit the building extent (with a little
+                    # padding) to a Web-Mercator zoom, clamped to a sensible range.
+                    try:
+                        _mlat = df_map['latitude'].dropna().to_numpy()
+                        _mlon = df_map['longitude'].dropna().to_numpy()
+                        if _mlat.size >= 2:
+                            _lon_span = max((float(np.nanmax(_mlon)) - float(np.nanmin(_mlon))) * 1.3, 1e-3)
+                            _lat_span = max((float(np.nanmax(_mlat)) - float(np.nanmin(_mlat))) * 1.3, 1e-3)
+                            _zoom_lon = math.log2(360.0 / _lon_span)
+                            _cl = max(math.cos(math.radians(float(center_lat))), 1e-6)
+                            _zoom_lat = math.log2((360.0 / (_lat_span * 1.4)) * _cl)
+                            _default_map_zoom = float(min(_zoom_lon, _zoom_lat))
+                            # Bias the default toward a closer view of the community.
+                            _default_map_zoom = max(min(_default_map_zoom + 1.5, 17.5), 13.0)
+                        else:
+                            _default_map_zoom = 15.5
+                    except Exception:
+                        _default_map_zoom = 15.5
+
                     # `_point_scale` is set by the "Point size" slider at the
                     # top of the map tab (see search_col3 above). All map
                     # markers below multiply their literal sizes by this
@@ -4644,7 +4675,7 @@ def main():
                             style=_bm_style,
                             layers=_bm_layers,
                             center=dict(lat=center_lat, lon=center_lon),
-                            zoom=12
+                            zoom=_default_map_zoom
                         ),
                         margin={"r":0,"t":0,"l":0,"b":0},
                         height=600,
@@ -5644,7 +5675,12 @@ def main():
                     pass
             
             try:
-                default_idx = sorted_ids.index(int(stored_id)) if stored_id is not None else 0
+                if stored_id is not None:
+                    default_idx = sorted_ids.index(int(stored_id))
+                elif selected_location == "Pamunkey" and 579536184 in building_ids:
+                    default_idx = sorted_ids.index(579536184)
+                else:
+                    default_idx = 0
             except (ValueError, TypeError):
                 default_idx = 0
             
@@ -6377,7 +6413,9 @@ def main():
     # ========================================================================
     # TAB 4: SCENARIO COMPARISON
     # ========================================================================
-    with tab4:
+    with tab1:
+        st.divider()
+        st.subheader("📈 Trends — scenario comparison across horizons")
         st.markdown('<p class="tab-description">Compare cumulative damage projections between Median (50th-percentile) and High-End (90th-percentile) sea level rise scenarios across all time horizons.</p>', unsafe_allow_html=True)
         
         if df_agg is not None:
