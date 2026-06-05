@@ -852,6 +852,171 @@ def compose_flood_png(basemap_rgb, depth_ft):
     return buf.getvalue()
 
 
+def fetch_osm_roads(bbox, timeout=60):
+    """Query the Overpass API for 'highway' ways in bbox (server-side).
+    Returns a list of dicts: {'coords' Nx2 (lon,lat), 'name', 'ref', 'highway'}.
+    Mirrors download_osm_roads_pamunkey.py but runs live for the map ROI."""
+    import urllib.request
+    import urllib.parse
+    import json as _json
+    lon_min, lat_min, lon_max, lat_max = bbox
+    query = (f"[out:json][timeout:{timeout}];"
+             f'way["highway"]({lat_min},{lon_min},{lat_max},{lon_max});'
+             f"out body geom;")
+    data = urllib.parse.urlencode({"data": query}).encode("utf-8")
+    req = urllib.request.Request(
+        "https://overpass-api.de/api/interpreter", data=data,
+        headers={"User-Agent": "ADAPT-FloodTool/1.0 (Columbia CCSR research app)"})
+    with urllib.request.urlopen(req, timeout=timeout + 30) as resp:
+        raw = _json.loads(resp.read().decode("utf-8"))
+    roads = []
+    for el in raw.get("elements", []):
+        if el.get("type") != "way" or "geometry" not in el:
+            continue
+        coords = np.array([[p["lon"], p["lat"]] for p in el["geometry"]], dtype=float)
+        if len(coords) < 2:
+            continue
+        tags = el.get("tags", {})
+        roads.append({
+            "coords": coords,
+            "name": tags.get("name", "") or "",
+            "ref": tags.get("ref", "") or "",
+            "highway": tags.get("highway", "unknown"),
+        })
+    return roads
+
+
+def sample_dem_bilinear(Zm, ext, lons, lats):
+    """Bilinear-sample the DEM (row 0 = north) at arrays of lon/lat; NaN off-grid."""
+    lon_min, lat_min, lon_max, lat_max = ext
+    nlat, nlon = Zm.shape
+    fc = (np.asarray(lons, float) - lon_min) / max(lon_max - lon_min, 1e-9) * (nlon - 1)
+    fr = (lat_max - np.asarray(lats, float)) / max(lat_max - lat_min, 1e-9) * (nlat - 1)
+    out = np.full(fc.shape, np.nan, dtype=float)
+    inb = (fc >= 0) & (fc <= nlon - 1) & (fr >= 0) & (fr <= nlat - 1)
+    if inb.any():
+        c0 = np.floor(fc[inb]).astype(int)
+        r0 = np.floor(fr[inb]).astype(int)
+        c1 = np.minimum(c0 + 1, nlon - 1)
+        r1 = np.minimum(r0 + 1, nlat - 1)
+        tx = fc[inb] - c0
+        ty = fr[inb] - r0
+        z00 = Zm[r0, c0]; z01 = Zm[r0, c1]; z10 = Zm[r1, c0]; z11 = Zm[r1, c1]
+        top = z00 * (1 - tx) + z01 * tx
+        bot = z10 * (1 - tx) + z11 * tx
+        out[inb] = top * (1 - ty) + bot * ty
+    return out
+
+
+def _dilate_mask(mask, iters):
+    """8-connectivity binary dilation by `iters` cells (numpy; no scipy)."""
+    m = mask.copy()
+    for _ in range(max(0, int(iters))):
+        d = m.copy()
+        d[1:, :] |= m[:-1, :]; d[:-1, :] |= m[1:, :]
+        d[:, 1:] |= m[:, :-1]; d[:, :-1] |= m[:, 1:]
+        d[1:, 1:] |= m[:-1, :-1]; d[:-1, :-1] |= m[1:, 1:]
+        d[1:, :-1] |= m[:-1, 1:]; d[:-1, 1:] |= m[1:, :-1]
+        m = d
+    return m
+
+
+def classify_roads(Zm, ext, roads, wl_ft, prox_m=30.0, sample_m=8.0):
+    """Classify road samples as 0 dry / 1 proximate / 2 flooded for a water level
+    (ft NAVD88). Open water (Z<=0) is excluded from the flood mask, matching the
+    flood-map tab. Returns (segments, counts) where segments is a list of
+    ((lon0,lat0),(lon1,lat1),status)."""
+    nlat, nlon = Zm.shape
+    lon_min, lat_min, lon_max, lat_max = ext
+    wl_m = float(wl_ft) * 0.3048
+    Zmask = np.where(np.isnan(Zm), 9999.0, Zm)
+    flood = (wl_m - Zmask > 0) & (Zmask > 0)
+    # proximity buffer in grid cells from the cell size
+    dy_m = (lat_max - lat_min) * 111320.0 / max(nlat, 1)
+    dx_m = (lon_max - lon_min) * 111320.0 * math.cos(math.radians(0.5 * (lat_min + lat_max))) / max(nlon, 1)
+    prox_cells = max(1, int(math.ceil(prox_m / max(min(dx_m, dy_m), 1e-6))))
+    prox = _dilate_mask(flood, prox_cells) & (~flood) & (Zmask > 0)
+
+    def to_rc(lons, lats):
+        c = np.clip(((lons - lon_min) / max(lon_max - lon_min, 1e-9) * (nlon - 1)).round().astype(int), 0, nlon - 1)
+        r = np.clip(((lat_max - lats) / max(lat_max - lat_min, 1e-9) * (nlat - 1)).round().astype(int), 0, nlat - 1)
+        return r, c
+
+    segs = []
+    nf = npx = nd = 0
+    for rd in roads:
+        coords = rd["coords"]
+        lons, lats = coords[:, 0], coords[:, 1]
+        # keep roads that intersect the ROI
+        if not np.any((lons >= lon_min) & (lons <= lon_max) & (lats >= lat_min) & (lats <= lat_max)):
+            continue
+        dlat = np.diff(lats) * 111320.0
+        dlon = np.diff(lons) * 111320.0 * math.cos(math.radians(float(np.mean(lats))))
+        seglen = np.sqrt(dlat ** 2 + dlon ** 2)
+        cum = np.concatenate([[0.0], np.cumsum(seglen)])
+        total = float(cum[-1])
+        if total < 1.0:
+            continue
+        n = max(int(total / sample_m), 2)
+        sd = np.linspace(0.0, total, n)
+        slat = np.interp(sd, cum, lats)
+        slon = np.interp(sd, cum, lons)
+        r, c = to_rc(slon, slat)
+        status = np.zeros(n, dtype=int)
+        status[prox[r, c]] = 1
+        status[flood[r, c]] = 2
+        for i in range(n - 1):
+            s = int(max(status[i], status[i + 1]))
+            segs.append(((float(slon[i]), float(slat[i])), (float(slon[i + 1]), float(slat[i + 1])), s))
+            if s == 2:
+                nf += 1
+            elif s == 1:
+                npx += 1
+            else:
+                nd += 1
+    tot = nf + npx + nd
+    counts = {
+        "flood": nf, "prox": npx, "dry": nd, "total": tot,
+        "pct_flood": 100.0 * nf / tot if tot else 0.0,
+        "pct_prox": 100.0 * npx / tot if tot else 0.0,
+        "pct_dry": 100.0 * nd / tot if tot else 0.0,
+    }
+    return segs, counts
+
+
+def compose_road_png(basemap_rgb, depth_ft, segments, ext):
+    """Basemap + flood-depth overlay + colored road segments -> PNG bytes.
+    Segment colors: green dry, orange proximate (<buffer), red flooded."""
+    import io as _io
+    from PIL import Image, ImageDraw
+    base = Image.fromarray(np.asarray(basemap_rgb, dtype=np.uint8), "RGB").convert("RGBA")
+    W, H = base.size
+    overlay = Image.fromarray(depth_to_rgba(depth_ft, alpha=150), "RGBA").resize((W, H), Image.NEAREST)
+    base = Image.alpha_composite(base, overlay)
+    draw = ImageDraw.Draw(base)
+    lon_min, lat_min, lon_max, lat_max = ext
+
+    def px(lon, lat):
+        x = (lon - lon_min) / max(lon_max - lon_min, 1e-9) * (W - 1)
+        y = (lat_max - lat) / max(lat_max - lat_min, 1e-9) * (H - 1)
+        return (x, y)
+
+    colors = {0: (34, 139, 34, 235), 1: (255, 140, 0, 240), 2: (220, 20, 20, 250)}
+    base_w = max(2, int(round(W / 450)))
+    widths = {0: base_w, 1: base_w + 1, 2: base_w + 2}
+    for status in (0, 1, 2):                       # dry, then proximate, then flooded on top
+        col = colors[status]
+        w = widths[status]
+        for p0, p1, s in segments:
+            if s != status:
+                continue
+            draw.line([px(*p0), px(*p1)], fill=col, width=w)
+    out = base.convert("RGB")
+    buf = _io.BytesIO()
+    out.save(buf, format="PNG")
+    return buf.getvalue()
+
+
 # Namespace so the Flood Maps tab can keep calling fdem.<fn>(...).
 fdem = SimpleNamespace(
     dem_tiles_for_bbox=dem_tiles_for_bbox,
@@ -863,6 +1028,10 @@ fdem = SimpleNamespace(
     tile_zoom_for_bbox=tile_zoom_for_bbox,
     fetch_basemap=fetch_basemap,
     compose_flood_png=compose_flood_png,
+    fetch_osm_roads=fetch_osm_roads,
+    sample_dem_bilinear=sample_dem_bilinear,
+    classify_roads=classify_roads,
+    compose_road_png=compose_road_png,
     legend_html=legend_html,
 )
 
@@ -877,6 +1046,12 @@ def _cached_dem_roi(bbox, res_m):
 def _cached_basemap(bbox, zoom, provider_label):
     """Cache wrapper around fetch_basemap (one fetch per ROI/zoom/provider)."""
     return fdem.fetch_basemap(bbox, zoom, provider_label)
+
+
+@st.cache_data(show_spinner=False)
+def _cached_osm_roads(bbox):
+    """Cache wrapper around fetch_osm_roads (one Overpass query per ROI)."""
+    return fdem.fetch_osm_roads(bbox)
 
 
 @st.cache_data(show_spinner=False)
@@ -2395,13 +2570,14 @@ def main():
     # MAIN CONTENT - TABS
     # ========================================================================
     
-    tab1, tab_dist, tab2, tab3, tab4, tab_flood = st.tabs([
+    tab1, tab_dist, tab2, tab3, tab4, tab_flood, tab_roads = st.tabs([
         "📊 Summary",
         "📦 Distributions",
         "🗺️ Map",
         "🏠 Details",
         "📈 Trends",
         "🌊 Flood Maps",
+        "🛣️ Flooded Roads",
     ])
 
     # ========================================================================
@@ -2651,6 +2827,237 @@ def main():
                         f"Bathtub model (no hydraulic connectivity); open water (Z ≤ 0) hidden. Terrain: "
                         f"USGS 3DEP 1/3 arc-second (~10 m), displayed at ~{_res_m:.0f} m. Basemap: "
                         f"{_base_label} — © OpenStreetMap contributors / © CARTO."
+                    )
+
+    # ========================================================================
+    # TAB: FLOODED ROADS — OSM road network classified by inundation
+    # ========================================================================
+    with tab_roads:
+        st.markdown(
+            '<p class="tab-description">OpenStreetMap roads classified against the same bathtub flood levels '
+            'as the Flood Maps tab. Each road is sampled along its length, its ground elevation read from the '
+            'terrain, and every segment flagged <b style="color:#dc1414">flooded</b> (surface below the water '
+            'level), <b style="color:#ff8c00">proximate</b> (within the buffer of flooding), or '
+            '<b style="color:#228b22">dry</b>.</p>',
+            unsafe_allow_html=True,
+        )
+
+        _rfl_ok = (selected_location in data_store and df_buildings is not None)
+        _rhas_xy = (
+            df_buildings is not None
+            and {'longitude', 'latitude'}.issubset(df_buildings.columns)
+            and df_buildings['latitude'].notna().any()
+            and df_buildings['longitude'].notna().any()
+        )
+        try:
+            import rasterio as _rio2  # noqa: F401
+            _rrio_ok = True
+        except Exception:
+            _rrio_ok = False
+
+        if not _rfl_ok:
+            st.info("Select a location with building data to map road flooding.")
+        elif not _rhas_xy:
+            st.warning("This location has no per-building coordinates, so the map extent can't be determined.")
+        elif not _rrio_ok:
+            st.error(
+                "Road maps need the **rasterio** package to read the terrain. "
+                "Add `rasterio` to the app's requirements.txt and redeploy."
+            )
+        else:
+            _rwl = loc_entry.get('water_levels', {}) if loc_entry else {}
+            _rscn_keys = [k for k in _rwl.keys() if not k.endswith('_mc')]
+            _rscn_label = {
+                '50th-percentile': 'Intermediate-High SLR (50th pct)',
+                '90th-percentile': 'High SLR (90th pct)',
+            }
+            _rscn_pretty = lambda k: _rscn_label.get(k, k)
+            _rref = '50th-percentile' if '50th-percentile' in _rwl else (_rscn_keys[0] if _rscn_keys else None)
+            _rref_df = _rwl.get(_rref)
+            _rbase_year = int(_rref_df['Year'].min()) if (_rref_df is not None and not _rref_df.empty) else 2025
+
+            def _rlvl(df, year, col):
+                if df is None or df.empty or col not in df.columns:
+                    return None
+                i = (df['Year'] - year).abs().idxmin()
+                return float(df.loc[i, col])
+
+            def _rslr(scn_key, year):
+                df = _rwl.get(scn_key)
+                a, b = _rlvl(df, year, 'P50'), _rlvl(df, _rbase_year, 'P50')
+                return (a - b) if (a is not None and b is not None) else 0.0
+
+            _rpf = {
+                'annual': _rlvl(_rref_df, _rbase_year, 'P50'),
+                'ten':    _rlvl(_rref_df, _rbase_year, 'P90'),
+                'one':    _rlvl(_rref_df, _rbase_year, 'P99'),
+            }
+
+            st.markdown(
+                f"**Present-day base levels** (ft NAVD88) — the same inputs as the Flood Maps tab; future "
+                f"levels add each scenario's sea-level rise."
+            )
+
+            _ris_pam = (selected_location == "Pamunkey")
+            if _ris_pam:
+                _rdefs = [
+                    ("High-tide flood",         2.37,           True,
+                     "High-tide flooding (HTF) level, ft NAVD88."),
+                    ("Monthly flood",           None,           False,
+                     "Optional. A level reached roughly monthly, ft NAVD88."),
+                    ("Annual flood",            _rpf['annual'], False,
+                     "≈ the level reached most years (50th-percentile annual maximum)."),
+                    ("10% annual-chance flood", 5.78,           True,
+                     "1-in-10-year level (90th-percentile annual maximum)."),
+                    ("1% annual-chance flood",  7.38,           True,
+                     "1-in-100-year level (99th-percentile annual maximum)."),
+                ]
+            else:
+                _rdefs = [
+                    ("High-tide flood",         None,           False,
+                     "Optional. e.g. the local NOAA minor/nuisance-flood threshold, ft NAVD88."),
+                    ("Monthly flood",           None,           False,
+                     "Optional. A level reached roughly monthly, ft NAVD88."),
+                    ("Annual flood",            _rpf['annual'], _rpf['annual'] is not None,
+                     "≈ the level reached most years (50th-percentile annual maximum)."),
+                    ("10% annual-chance flood", _rpf['ten'],    _rpf['ten'] is not None,
+                     "1-in-10-year level (90th-percentile annual maximum)."),
+                    ("1% annual-chance flood",  _rpf['one'],    _rpf['one'] is not None,
+                     "1-in-100-year level (99th-percentile annual maximum)."),
+                ]
+
+            _rrows = []
+            for _lbl, _val, _on, _help in _rdefs:
+                _c0, _c1 = st.columns([0.34, 0.66])
+                _inc = _c0.checkbox(_lbl, value=_on, key=f"rdf_inc_{_lbl}", help=_help)
+                _default = float(_val) if _val is not None else 0.0
+                _lv = _c1.number_input(
+                    f"{_lbl} level (ft NAVD88)", value=_default, step=0.5, format="%.2f",
+                    key=f"rdf_val_{_lbl}", label_visibility="collapsed",
+                )
+                if _inc:
+                    _rrows.append((_lbl, float(_lv)))
+
+            _rc_scn, _rc_yr = st.columns(2)
+            _rscn_sel = _rc_scn.multiselect(
+                "SLR scenarios", options=_rscn_keys, default=_rscn_keys,
+                format_func=_rscn_pretty, key="rd_scn",
+            )
+            _ryears_sel = _rc_yr.multiselect(
+                "Planning horizons", options=available_years, default=available_years,
+                format_func=lambda y: str(int(y)), key="rd_years",
+            )
+            _rcz, _rcd, _rcb = st.columns([0.36, 0.32, 0.32])
+            _rzoom = _rcz.slider(
+                "Zoom (tighten)", min_value=0.5, max_value=3.0, value=1.0, step=0.25,
+                key="rd_zoom", help="Higher = tighter crop around the community.",
+            )
+            _rres_label = _rcd.selectbox(
+                "Map detail", ["Standard", "Fine", "Finer"], index=1, key="rd_detail",
+                help="Higher detail = sharper, larger images; a bit slower.",
+            )
+            _rres_m, _rtarget_px = {
+                "Standard": (10.0, 700), "Fine": (5.0, 1000), "Finer": (3.0, 1300),
+            }[_rres_label]
+            _rbase_label = _rcb.selectbox("Basemap", ["OSM (color)", "Light", "Dark"], index=0, key="rd_base")
+            _rprox = st.slider(
+                "Proximity buffer (m)", min_value=10, max_value=100, value=30, step=5, key="rd_prox",
+                help="Roads within this distance of flooded ground are flagged 'proximate' "
+                     "(Koks et al. 2019; Pregnolato et al. 2017 use ~30 m).",
+            )
+            st.caption(
+                "A road map is produced for every ticked level × horizon × scenario. Maps render as static "
+                "images. Roads come live from OpenStreetMap (Overpass) for the map area."
+            )
+
+            if not _rrows:
+                st.info("Tick at least one flood level to generate maps.")
+            elif not _ryears_sel:
+                st.info("Select at least one planning horizon.")
+            elif not _rscn_sel:
+                st.info("Select at least one SLR scenario.")
+            elif st.button("🛣️ Generate road maps", type="primary", key="rd_go"):
+                _lonA = df_buildings['longitude'].to_numpy(dtype=float)
+                _latA = df_buildings['latitude'].to_numpy(dtype=float)
+                _lonA, _latA, _swap = fdem.maybe_swap_lonlat(_lonA, _latA)
+                try:
+                    _bb = fdem.roi_from_lonlat(_lonA, _latA, buffer_m=350.0)
+                    _cx = 0.5 * (_bb[0] + _bb[2]); _cy = 0.5 * (_bb[1] + _bb[3])
+                    _hw = 0.5 * (_bb[2] - _bb[0]) / _rzoom; _hh = 0.5 * (_bb[3] - _bb[1]) / _rzoom
+                    _bb = (_cx - _hw, _cy - _hh, _cx + _hw, _cy + _hh)
+                    _bbr = tuple(round(v, 5) for v in _bb)
+                except Exception as _e:
+                    st.error(f"Could not determine the map area: {_e}")
+                    _bbr = None
+
+                _Zm = None
+                _ext = None
+                _base_img = None
+                _roads = None
+                if _bbr is not None:
+                    with st.spinner("Fetching terrain (3DEP), basemap, and OSM roads…"):
+                        try:
+                            _Zm, _ext = _cached_dem_roi(_bbr, _rres_m)
+                        except Exception as _e:
+                            st.error("Could not load terrain from USGS 3DEP (needs internet at runtime). %s" % _e)
+                        try:
+                            _zt = fdem.tile_zoom_for_bbox(_bbr, target_px=_rtarget_px)
+                            _base_img, _ = _cached_basemap(_bbr, _zt, _rbase_label)
+                        except Exception as _e:
+                            st.warning("Basemap tiles unavailable; roads will draw on a plain background. %s" % _e)
+                        try:
+                            _roads = _cached_osm_roads(_bbr)
+                        except Exception as _e:
+                            st.error(
+                                "Could not download OSM roads from Overpass (needs internet at runtime; the "
+                                "public Overpass server may be busy — try again in a moment). %s" % _e
+                            )
+
+                if _Zm is not None and _ext is not None and _roads is not None:
+                    st.markdown(
+                        '<div style="margin:0.5rem 0 0.8rem;padding:0.55rem 0.8rem;background:#f8fafc;'
+                        'border:1px solid #e2e8f0;border-radius:8px;font-size:1.05rem;">'
+                        '<b style="font-size:1.2rem;">Roads</b>&nbsp;&nbsp;'
+                        '<span style="color:#dc1414;font-weight:800;">━</span> flooded'
+                        '&nbsp;&nbsp;&nbsp;<span style="color:#ff8c00;font-weight:800;">━</span> proximate'
+                        '&nbsp;&nbsp;&nbsp;<span style="color:#228b22;font-weight:800;">━</span> dry'
+                        '&nbsp;&nbsp;&nbsp;<span style="color:#3b6fb0;">▒▒</span> flood depth (blue shading)'
+                        '</div>',
+                        unsafe_allow_html=True,
+                    )
+                    st.caption(f"{len(_roads)} OpenStreetMap road way(s) in view.")
+                    if _base_img is None:
+                        _base_img = np.full((max(2, _Zm.shape[0]), max(2, _Zm.shape[1]), 3), 245, dtype=np.uint8)
+
+                    with st.spinner("Classifying roads and building maps…"):
+                        for _scn in _rscn_sel:
+                            st.markdown(f"##### {_rscn_pretty(_scn)}")
+                            _cols = st.columns(2)
+                            _k = 0
+                            for _lbl, _blv in _rrows:
+                                for _yr in _ryears_sel:
+                                    _wl = _blv + _rslr(_scn, _yr)
+                                    _segs, _cnt = fdem.classify_roads(
+                                        _Zm, _ext, _roads, _wl, prox_m=float(_rprox))
+                                    _depth = fdem.bathtub_depth_ft(_Zm, _wl, mask_water=True)
+                                    _tgt = _cols[_k % 2]
+                                    _tgt.markdown(
+                                        f"**{_lbl} — {int(_yr)}**<br>"
+                                        f"<span style='font-size:0.95rem;color:#374151'>"
+                                        f"WL ≈ {_wl:.2f} ft NAVD88 &nbsp;•&nbsp; "
+                                        f"flooded {_cnt['pct_flood']:.0f}% · proximate {_cnt['pct_prox']:.0f}% · "
+                                        f"dry {_cnt['pct_dry']:.0f}%</span>",
+                                        unsafe_allow_html=True,
+                                    )
+                                    _png = fdem.compose_road_png(_base_img, _depth, _segs, _ext)
+                                    _tgt.image(_png, use_container_width=True)
+                                    _k += 1
+
+                    st.caption(
+                        f"Road segments: red = flooded (sampled surface below the water level), orange = within "
+                        f"{int(_rprox)} m of flooding, green = dry. Percentages are by segment count. Road "
+                        f"elevations and flood shading from USGS 3DEP (~10 m), displayed at ~{_rres_m:.0f} m; "
+                        f"roads from OpenStreetMap. Open water (Z ≤ 0) is excluded from the flood mask."
                     )
 
     # ========================================================================
