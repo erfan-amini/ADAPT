@@ -676,11 +676,16 @@ def read_dem_roi(bbox, target_res_m=10.0):
     return dst, (lon_min, lat_min, lon_max, lat_max)
 
 
-def bathtub_depth_ft(Z_m, wl_ft):
-    """Bathtub depth (ft) for a water level (ft NAVD88); NaN where dry/water."""
+def bathtub_depth_ft(Z_m, wl_ft, mask_water=False):
+    """Bathtub depth (ft) for a water level (ft NAVD88); NaN where dry.
+    By default masks only NoData, so low-lying land below NAVD88 zero still
+    floods. With mask_water=True, also hides Z<=0 (treats it as permanent
+    open water) for a cleaner look on a land-only DEM."""
     wl_m = float(wl_ft) * 0.3048
     depth_m = wl_m - Z_m
-    invalid = ~np.isfinite(Z_m) | (Z_m <= 0.0)
+    invalid = ~np.isfinite(Z_m)
+    if mask_water:
+        invalid = invalid | (Z_m <= 0.0)
     depth_m = np.where(invalid, np.nan, depth_m)
     depth_m = np.where(depth_m < 0.0, np.nan, depth_m)
     return depth_m.astype("float32") * FT_PER_M
@@ -743,6 +748,23 @@ def legend_html(area_note=None):
         '<span style="display:inline-flex;flex-wrap:wrap;align-items:center;vertical-align:middle;">'
         + "".join(items) + "</span>" + extra + "</div>"
     )
+
+
+def _flood_basemap(label):
+    """Return (mapbox_style, base_layers) for the chosen basemap, using
+    CARTO's raster CDN (reliable) — NOT OpenStreetMap, whose volunteer tile
+    servers now 403 embedded apps ('Referer is required by tile usage
+    policy'). 'Streets (color)' uses CARTO Voyager via a white-bg + raster
+    layer (Plotly's recommended custom-tile approach)."""
+    if label == "Light":
+        return "carto-positron", []
+    if label == "Dark":
+        return "carto-darkmatter", []
+    # Streets (color): CARTO Voyager raster on a blank background.
+    return "white-bg", [dict(
+        below="traces", sourcetype="raster", sourceattribution="© OpenStreetMap contributors © CARTO",
+        source=["https://basemaps.cartocdn.com/rastertiles/voyager/{z}/{x}/{y}.png"],
+    )]
 
 
 # Namespace so the Flood Maps tab can keep calling fdem.<fn>(...).
@@ -2414,11 +2436,12 @@ def main():
             _base_label = _cb.selectbox(
                 "Basemap", ["Streets (color)", "Light", "Dark"], index=0,
             )
-            _base_style = {
-                "Streets (color)": "open-street-map",
-                "Light": "carto-positron",
-                "Dark": "carto-darkmatter",
-            }[_base_label]
+            _mask_water = st.checkbox(
+                "Hide open water (Z ≤ 0)", value=False,
+                help="Off (default): show every area below the chosen water level, including "
+                     "low-lying land below NAVD88 zero. On: treat Z ≤ 0 as permanent open water "
+                     "and hide it (cleaner, closer to the topobathy maps).",
+            )
             st.caption(
                 f"A map is produced for every ticked level × horizon × scenario. For each scenario, SLR is "
                 f"the rise in the median annual-maximum water level from {_base_year} to that horizon."
@@ -2485,6 +2508,7 @@ def main():
                     _lat_m = (_ext[3] - _ext[1]) * 111320.0
                     _lon_m = (_ext[2] - _ext[0]) * 111320.0 * math.cos(math.radians(_clat))
                     _cell_m2 = (_lat_m / _Zm.shape[0]) * (_lon_m / _Zm.shape[1])
+                    _style, _base_layers = _flood_basemap(_base_label)
 
                     for _scn in _scn_sel:
                         st.markdown(f"##### {_scn_pretty(_scn)}")
@@ -2493,17 +2517,17 @@ def main():
                         for _lbl, _base_lv in _rows:
                             for _yr in _years_sel:
                                 _wl_ft = _base_lv + _slr(_scn, _yr)
-                                _depth = fdem.bathtub_depth_ft(_Zm, _wl_ft)
+                                _depth = fdem.bathtub_depth_ft(_Zm, _wl_ft, mask_water=_mask_water)
                                 _nflood = int(np.isfinite(_depth).sum())
                                 _flood_km2 = _nflood * _cell_m2 / 1e6
-                                # Always show the basemap; add the overlay only if there is flooding.
-                                _layers = []
+                                # Start from the basemap raster (if any); add the flood overlay on top.
+                                _layers = list(_base_layers)
                                 if _nflood > 0:
-                                    _layers = [dict(
+                                    _layers.append(dict(
                                         sourcetype="image",
                                         source=fdem.depth_to_rgba_data_uri(_depth),
                                         coordinates=_coords, below="traces", opacity=0.85,
-                                    )]
+                                    ))
                                 _sub = (f"WL ≈ {_wl_ft:.2f} ft NAVD88  •  flooded ≈ {_flood_km2:.2f} km²"
                                         if _nflood > 0 else
                                         f"WL ≈ {_wl_ft:.2f} ft NAVD88  •  no inundation")
@@ -2514,7 +2538,7 @@ def main():
                                 ))
                                 _fig.update_layout(
                                     mapbox=dict(
-                                        style=_base_style,
+                                        style=_style,
                                         center=dict(lat=_clat, lon=_clon),
                                         zoom=_zoom, layers=_layers,
                                     ),
