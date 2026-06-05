@@ -5977,6 +5977,113 @@ def main():
                             "of \"yearly / 10-year / 100-year\")."
                         )
                 
+                # ----------------------------------------------------------
+                # Retrofit "slide" cards — the numbers laid out like the
+                # workshop action slides (elevation references + Benefit and
+                # Remaining-recovery-cost by horizon), framed so they're easy
+                # to transcribe. Cards appear only when the retrofit applies:
+                # Elevate is absent above DFE, WFP Basement absent without a
+                # basement, WFP First-floor only for multi-story buildings.
+                # ----------------------------------------------------------
+                _scn_for_cards = scenario
+                _scn_lbl_cards = {
+                    '50th-percentile': 'Median SLR (P50)',
+                    '90th-percentile': 'High-End SLR (P90)',
+                }.get(_scn_for_cards, _scn_for_cards)
+                _bfe = (loc_entry or {}).get('bfe_ft')
+                _dfe = (float(_bfe) + 2.0) if (_bfe is not None and pd.notna(_bfe)) else None
+                _gnd = building_info.get('ground_elevation')
+                _ffe_c = building_info.get('FFE_ft')
+                _nstory = building_info.get('number_of_stories')
+
+                _card_horizons = [(2040, '15-yr'), (2055, '30-yr'), (2060, '35-yr')]
+                _retrofit_specs = [
+                    ('Raise Utilities', 'raise mechanicals', False),
+                    ('WFP B',           'wet floodproof the basement', False),
+                    ('Elevate',         'raise the house', True),
+                    ('WFP 1st',         'wet floodproof the first floor', False),
+                ]
+
+                def _cum(action, yr, pct):
+                    _r = df_building[(df_building['Action'] == action)
+                                     & (df_building['SLR'] == _scn_for_cards)
+                                     & (df_building['TargetYear'] == yr)]
+                    col = f'CumEAD_{pct}'
+                    if _r.empty or col not in _r.columns:
+                        return None
+                    v = _r[col].iloc[0]
+                    return float(v) if pd.notna(v) else None
+
+                def _money_c(v):
+                    return format_currency(v) if v is not None else "—"
+
+                _cards_html = []
+                for _akey, _atitle, _show_raise in _retrofit_specs:
+                    if df_building[(df_building['Action'] == _akey)
+                                   & (df_building['SLR'] == _scn_for_cards)].empty:
+                        continue
+                    if _akey == 'WFP 1st' and (pd.isna(_nstory) or float(_nstory) <= 1):
+                        continue
+
+                    _elev_bits = []
+                    if pd.notna(_gnd):
+                        _elev_bits.append(f"Ground: <b>{float(_gnd):.1f} ft</b>")
+                    if pd.notna(_ffe_c):
+                        if _show_raise and _dfe is not None:
+                            _elev_bits.append(
+                                f"First floor: <b>raised from {float(_ffe_c):.1f} ft to {_dfe:.1f} ft</b>")
+                        else:
+                            _elev_bits.append(f"First floor: <b>{float(_ffe_c):.1f} ft</b>")
+                    if _dfe is not None:
+                        _elev_bits.append(f"DFE: <b>{_dfe:.1f} ft</b>")
+                    if _bfe is not None and pd.notna(_bfe):
+                        _elev_bits.append(f"BFE: <b>{float(_bfe):.1f} ft</b>")
+
+                    _ben_lines, _rem_lines = [], []
+                    for _yr, _hlabel in _card_horizons:
+                        b50, a50 = _cum('No mitigation', _yr, 'P50'), _cum(_akey, _yr, 'P50')
+                        b05, a05 = _cum('No mitigation', _yr, 'P05'), _cum(_akey, _yr, 'P05')
+                        b95, a95 = _cum('No mitigation', _yr, 'P95'), _cum(_akey, _yr, 'P95')
+                        if b50 is not None and a50 is not None:
+                            ben = max(b50 - a50, 0.0)
+                            rng = ""
+                            if None not in (b05, a05, b95, a95):
+                                _e1, _e2 = max(b05 - a05, 0.0), max(b95 - a95, 0.0)
+                                rng = f" ({_money_c(min(_e1, _e2))}–{_money_c(max(_e1, _e2))})"
+                            _ben_lines.append(
+                                f"Benefit {_hlabel} ({_yr}): <b>{_money_c(ben)}</b>{rng}")
+                        if a50 is not None:
+                            rrng = (f" ({_money_c(a05)}–{_money_c(a95)})"
+                                    if (a05 is not None and a95 is not None) else "")
+                            _rem_lines.append(
+                                f"Remaining recovery cost {_hlabel} ({_yr}): <b>{_money_c(a50)}</b>{rrng}")
+
+                    card = (
+                        '<div style="border:2px solid #1f6f8b;border-radius:10px;'
+                        'padding:0.85rem 1.05rem;margin:0.6rem 0;background:#f5fafc;">'
+                        f'<div style="font-size:1.18rem;font-weight:800;color:#0f4c5c;'
+                        f'margin-bottom:0.35rem;">Should they {_atitle}?</div>'
+                        + ('<div style="color:#374151;margin-bottom:0.5rem;">'
+                           + ' &nbsp;•&nbsp; '.join(_elev_bits) + '</div>' if _elev_bits else '')
+                        + ''.join(f'<div style="color:#1f2937;font-size:1.02rem;">{_l}</div>'
+                                  for _l in _ben_lines)
+                        + ('<div style="height:0.35rem;"></div>' if _rem_lines else '')
+                        + ''.join(f'<div style="color:#6b7280;">{_l}</div>' for _l in _rem_lines)
+                        + '</div>'
+                    )
+                    _cards_html.append(card)
+
+                if _cards_html:
+                    st.divider()
+                    st.subheader("Retrofit options — figures for the action slides")
+                    st.caption(
+                        f"Computed under **{_scn_lbl_cards}** (switch SLR in the sidebar). "
+                        f"Benefit = avoided cumulative recovery cost vs. taking no action; remaining = the cost "
+                        f"that still occurs with the action. Median with (low–high) range. Each box is one slide."
+                    )
+                    for _c in _cards_html:
+                        st.markdown(_c, unsafe_allow_html=True)
+
                 st.divider()
                 
                 st.subheader("Damage Trajectory: SLR Scenario Comparison")
