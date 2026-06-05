@@ -2730,7 +2730,7 @@ def main():
                 help="Higher = tighter crop around the community (more zoomed in).",
             )
             _res_label = _cd.selectbox(
-                "Map detail", ["Standard", "Fine", "Finer"], index=1,
+                "Map detail", ["Standard", "Fine", "Finer"], index=2,
                 help="Higher detail = sharper, larger images; a bit slower.",
             )
             _res_m, _target_px = {
@@ -2972,7 +2972,7 @@ def main():
                 key="rd_zoom", help="Higher = tighter crop around the community.",
             )
             _rres_label = _rcd.selectbox(
-                "Map detail", ["Standard", "Fine", "Finer"], index=1, key="rd_detail",
+                "Map detail", ["Standard", "Fine", "Finer"], index=2, key="rd_detail",
                 help="Higher detail = sharper, larger images; a bit slower.",
             )
             _rres_m, _rtarget_px = {
