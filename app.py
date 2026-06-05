@@ -750,21 +750,106 @@ def legend_html(area_note=None):
     )
 
 
-def _flood_basemap(label):
-    """Return (mapbox_style, base_layers) for the chosen basemap, using
-    CARTO's raster CDN (reliable) — NOT OpenStreetMap, whose volunteer tile
-    servers now 403 embedded apps ('Referer is required by tile usage
-    policy'). 'Streets (color)' uses CARTO Voyager via a white-bg + raster
-    layer (Plotly's recommended custom-tile approach)."""
-    if label == "Light":
-        return "carto-positron", []
-    if label == "Dark":
-        return "carto-darkmatter", []
-    # Streets (color): CARTO Voyager raster on a blank background.
-    return "white-bg", [dict(
-        below="traces", sourcetype="raster", sourceattribution="© OpenStreetMap contributors © CARTO",
-        source=["https://basemaps.cartocdn.com/rastertiles/voyager/{z}/{x}/{y}.png"],
-    )]
+def depth_to_rgba(depth_ft, alpha=217):
+    """Depth-in-feet array -> (H,W,4) uint8 RGBA (discrete bins; dry transparent)."""
+    h, w = depth_ft.shape
+    rgba = np.zeros((h, w, 4), dtype=np.uint8)
+    n = len(WS_COLORS)
+    for b, (r, g, bl) in enumerate(WS_COLORS):
+        if b < n - 1:
+            mm = (depth_ft >= WS_BINS_FT[b]) & (depth_ft < WS_BINS_FT[b + 1])
+        else:
+            mm = depth_ft >= WS_BINS_FT[b]
+        rgba[mm, 0] = r
+        rgba[mm, 1] = g
+        rgba[mm, 2] = bl
+        rgba[mm, 3] = alpha
+    return rgba
+
+
+_TILE_PROVIDERS = {
+    "OSM (color)": "https://tile.openstreetmap.org/{z}/{x}/{y}.png",
+    "Light": "https://basemaps.cartocdn.com/rastertiles/light_all/{z}/{x}/{y}.png",
+    "Dark": "https://basemaps.cartocdn.com/rastertiles/dark_all/{z}/{x}/{y}.png",
+}
+
+
+def _lonlat_to_tilexy(lon, lat, z):
+    n = 2.0 ** z
+    x = (lon + 180.0) / 360.0 * n
+    y = (1.0 - math.asinh(math.tan(math.radians(lat))) / math.pi) / 2.0 * n
+    return x, y
+
+
+def tile_zoom_for_bbox(bbox, target_px=1000, tile_px=256, max_zoom=18):
+    """Integer slippy zoom so the bbox renders ~target_px wide."""
+    lon_min, lat_min, lon_max, lat_max = bbox
+    lon_span = max(lon_max - lon_min, 1e-6)
+    z = math.log2(target_px * 360.0 / (tile_px * lon_span))
+    return int(max(1, min(max_zoom, round(z))))
+
+
+def fetch_basemap(bbox, zoom, provider_label, tile_px=256, max_tiles=40):
+    """Fetch & stitch XYZ tiles for bbox at integer slippy zoom, cropped to bbox.
+    Returns (rgb uint8 [H,W,3], bbox). Fetched SERVER-SIDE with a User-Agent,
+    which avoids OpenStreetMap's browser 403 ('Referer required by tile policy')
+    and uses no WebGL (so any number of maps can be shown). The zoom is reduced
+    if needed so no more than `max_tiles` tiles are requested (courtesy/speed)."""
+    import io as _io
+    import requests
+    from PIL import Image
+    lon_min, lat_min, lon_max, lat_max = bbox
+    url_tmpl = _TILE_PROVIDERS.get(provider_label, _TILE_PROVIDERS["OSM (color)"])
+    # Keep the tile count modest by dropping a zoom level if the span is large.
+    while zoom > 4:
+        _x0, _y0 = _lonlat_to_tilexy(lon_min, lat_max, zoom)
+        _x1, _y1 = _lonlat_to_tilexy(lon_max, lat_min, zoom)
+        _c = int(math.floor(_x1)) - int(math.floor(_x0)) + 1
+        _r = int(math.floor(_y1)) - int(math.floor(_y0)) + 1
+        if _c * _r <= max_tiles:
+            break
+        zoom -= 1
+    x0f, y0f = _lonlat_to_tilexy(lon_min, lat_max, zoom)   # NW corner -> top-left
+    x1f, y1f = _lonlat_to_tilexy(lon_max, lat_min, zoom)   # SE corner -> bottom-right
+    xt0, yt0 = int(math.floor(x0f)), int(math.floor(y0f))
+    xt1, yt1 = int(math.floor(x1f)), int(math.floor(y1f))
+    nmax = int(2 ** zoom) - 1
+    xt0 = max(0, xt0); yt0 = max(0, yt0)
+    xt1 = min(nmax, xt1); yt1 = min(nmax, yt1)
+    cols = xt1 - xt0 + 1
+    rows = yt1 - yt0 + 1
+    mosaic = Image.new("RGB", (cols * tile_px, rows * tile_px), (235, 235, 235))
+    headers = {"User-Agent": "ADAPT-FloodTool/1.0 (Columbia CCSR research app)"}
+    for ix, xt in enumerate(range(xt0, xt1 + 1)):
+        for iy, yt in enumerate(range(yt0, yt1 + 1)):
+            try:
+                resp = requests.get(url_tmpl.format(z=zoom, x=xt, y=yt),
+                                    headers=headers, timeout=12)
+                if resp.status_code == 200:
+                    tile = Image.open(_io.BytesIO(resp.content)).convert("RGB")
+                    mosaic.paste(tile, (ix * tile_px, iy * tile_px))
+            except Exception:                              # noqa: BLE001
+                pass
+    left = (x0f - xt0) * tile_px
+    top = (y0f - yt0) * tile_px
+    right = (x1f - xt0) * tile_px
+    bottom = (y1f - yt0) * tile_px
+    crop = mosaic.crop((int(round(left)), int(round(top)),
+                        max(int(round(right)), int(round(left)) + 1),
+                        max(int(round(bottom)), int(round(top)) + 1)))
+    return np.asarray(crop, dtype=np.uint8), (lon_min, lat_min, lon_max, lat_max)
+
+
+def compose_flood_png(basemap_rgb, depth_ft):
+    """Alpha-composite the flood overlay onto the basemap; return PNG bytes."""
+    import io as _io
+    from PIL import Image
+    base = Image.fromarray(np.asarray(basemap_rgb, dtype=np.uint8), "RGB").convert("RGBA")
+    overlay = Image.fromarray(depth_to_rgba(depth_ft), "RGBA").resize(base.size, Image.NEAREST)
+    out = Image.alpha_composite(base, overlay).convert("RGB")
+    buf = _io.BytesIO()
+    out.save(buf, format="PNG")
+    return buf.getvalue()
 
 
 # Namespace so the Flood Maps tab can keep calling fdem.<fn>(...).
@@ -774,8 +859,10 @@ fdem = SimpleNamespace(
     maybe_swap_lonlat=maybe_swap_lonlat,
     read_dem_roi=read_dem_roi,
     bathtub_depth_ft=bathtub_depth_ft,
-    depth_to_rgba_data_uri=depth_to_rgba_data_uri,
-    mapbox_zoom_for_bbox=mapbox_zoom_for_bbox,
+    depth_to_rgba=depth_to_rgba,
+    tile_zoom_for_bbox=tile_zoom_for_bbox,
+    fetch_basemap=fetch_basemap,
+    compose_flood_png=compose_flood_png,
     legend_html=legend_html,
 )
 
@@ -784,6 +871,12 @@ fdem = SimpleNamespace(
 def _cached_dem_roi(bbox, res_m):
     """Cache wrapper around read_dem_roi (keyed on rounded bbox)."""
     return fdem.read_dem_roi(bbox, res_m)
+
+
+@st.cache_data(show_spinner=False)
+def _cached_basemap(bbox, zoom, provider_label):
+    """Cache wrapper around fetch_basemap (one fetch per ROI/zoom/provider)."""
+    return fdem.fetch_basemap(bbox, zoom, provider_label)
 
 
 @st.cache_data(show_spinner=False)
@@ -2422,29 +2515,24 @@ def main():
                 "Planning horizons", options=available_years, default=available_years,
                 format_func=lambda y: str(int(y)),
             )
-            _cz, _cd, _cb = st.columns([0.4, 0.3, 0.3])
-            _zoom_boost = _cz.slider(
-                "Map zoom", min_value=-2.0, max_value=5.0, value=1.0, step=0.5,
-                help="Higher = more zoomed in.",
+            _cz, _cd, _cb = st.columns([0.36, 0.32, 0.32])
+            _zoom_factor = _cz.slider(
+                "Zoom (tighten)", min_value=0.5, max_value=3.0, value=1.0, step=0.25,
+                help="Higher = tighter crop around the community (more zoomed in).",
             )
             _res_label = _cd.selectbox(
-                "Map detail", ["Standard (~10 m)", "Fine (~5 m)", "Finer (~3 m)"], index=1,
-                help="Finer = sharper at full screen (interpolated from the 10 m source); "
-                     "slower with many maps.",
+                "Map detail", ["Standard", "Fine", "Finer"], index=1,
+                help="Higher detail = sharper, larger images; a bit slower.",
             )
-            _res_m = {"Standard (~10 m)": 10.0, "Fine (~5 m)": 5.0, "Finer (~3 m)": 3.0}[_res_label]
-            _base_label = _cb.selectbox(
-                "Basemap", ["Streets (color)", "Light", "Dark"], index=0,
-            )
-            _mask_water = st.checkbox(
-                "Hide open water (Z ≤ 0)", value=False,
-                help="Off (default): show every area below the chosen water level, including "
-                     "low-lying land below NAVD88 zero. On: treat Z ≤ 0 as permanent open water "
-                     "and hide it (cleaner, closer to the topobathy maps).",
-            )
+            _res_m, _target_px = {
+                "Standard": (10.0, 700), "Fine": (5.0, 1000), "Finer": (3.0, 1300),
+            }[_res_label]
+            _base_label = _cb.selectbox("Basemap", ["OSM (color)", "Light", "Dark"], index=0)
             st.caption(
                 f"A map is produced for every ticked level × horizon × scenario. For each scenario, SLR is "
-                f"the rise in the median annual-maximum water level from {_base_year} to that horizon."
+                f"the rise in the median annual-maximum water level from {_base_year} to that horizon. "
+                f"Open water (Z ≤ 0) is hidden. Maps render as static images, so there is no limit on how "
+                f"many can be shown."
             )
 
             if not _rows:
@@ -2459,6 +2547,12 @@ def main():
                 _lonA, _latA, _swapped = fdem.maybe_swap_lonlat(_lonA, _latA)
                 try:
                     _bbox = fdem.roi_from_lonlat(_lonA, _latA, buffer_m=350.0)
+                    # Apply the zoom (tighten) factor: shrink the half-extent about the centre.
+                    _cx = 0.5 * (_bbox[0] + _bbox[2])
+                    _cy = 0.5 * (_bbox[1] + _bbox[3])
+                    _hw = 0.5 * (_bbox[2] - _bbox[0]) / _zoom_factor
+                    _hh = 0.5 * (_bbox[3] - _bbox[1]) / _zoom_factor
+                    _bbox = (_cx - _hw, _cy - _hh, _cx + _hw, _cy + _hh)
                     _bbox_r = tuple(round(v, 5) for v in _bbox)
                 except Exception as _e:
                     st.error(f"Could not determine the map area: {_e}")
@@ -2466,14 +2560,23 @@ def main():
 
                 _Zm = None
                 _ext = None
+                _base_img = None
                 if _bbox_r is not None:
-                    with st.spinner("Fetching terrain (USGS 3DEP) and computing inundation…"):
+                    with st.spinner("Fetching terrain (USGS 3DEP) and basemap…"):
                         try:
                             _Zm, _ext = _cached_dem_roi(_bbox_r, _res_m)
                         except Exception as _e:
                             st.error(
                                 "Could not load terrain for this area from USGS 3DEP "
                                 "(this needs internet access at runtime). Details: %s" % _e
+                            )
+                        try:
+                            _ztiles = fdem.tile_zoom_for_bbox(_bbox_r, target_px=_target_px)
+                            _base_img, _ = _cached_basemap(_bbox_r, _ztiles, _base_label)
+                        except Exception as _e:
+                            st.warning(
+                                "Could not load basemap tiles; maps will show flooding on a plain "
+                                "background. Details: %s" % _e
                             )
 
                 with st.expander("Map-area diagnostics"):
@@ -2499,16 +2602,11 @@ def main():
 
                 if _Zm is not None and _ext is not None:
                     st.markdown(fdem.legend_html(), unsafe_allow_html=True)
-                    _zoom = fdem.mapbox_zoom_for_bbox(_ext) + _zoom_boost
-                    _clat = 0.5 * (_ext[1] + _ext[3])
-                    _clon = 0.5 * (_ext[0] + _ext[2])
-                    _coords = [[_ext[0], _ext[3]], [_ext[2], _ext[3]],
-                               [_ext[2], _ext[1]], [_ext[0], _ext[1]]]
-                    # Approx per-cell ground area (m²) for a flooded-area readout.
                     _lat_m = (_ext[3] - _ext[1]) * 111320.0
-                    _lon_m = (_ext[2] - _ext[0]) * 111320.0 * math.cos(math.radians(_clat))
+                    _lon_m = (_ext[2] - _ext[0]) * 111320.0 * math.cos(math.radians(0.5 * (_ext[1] + _ext[3])))
                     _cell_m2 = (_lat_m / _Zm.shape[0]) * (_lon_m / _Zm.shape[1])
-                    _style, _base_layers = _flood_basemap(_base_label)
+                    if _base_img is None:
+                        _base_img = np.full((max(2, _Zm.shape[0]), max(2, _Zm.shape[1]), 3), 245, dtype=np.uint8)
 
                     for _scn in _scn_sel:
                         st.markdown(f"##### {_scn_pretty(_scn)}")
@@ -2517,47 +2615,26 @@ def main():
                         for _lbl, _base_lv in _rows:
                             for _yr in _years_sel:
                                 _wl_ft = _base_lv + _slr(_scn, _yr)
-                                _depth = fdem.bathtub_depth_ft(_Zm, _wl_ft, mask_water=_mask_water)
+                                _depth = fdem.bathtub_depth_ft(_Zm, _wl_ft, mask_water=True)
                                 _nflood = int(np.isfinite(_depth).sum())
                                 _flood_km2 = _nflood * _cell_m2 / 1e6
-                                # Start from the basemap raster (if any); add the flood overlay on top.
-                                _layers = list(_base_layers)
-                                if _nflood > 0:
-                                    _layers.append(dict(
-                                        sourcetype="image",
-                                        source=fdem.depth_to_rgba_data_uri(_depth),
-                                        coordinates=_coords, below="traces", opacity=0.85,
-                                    ))
-                                _sub = (f"WL ≈ {_wl_ft:.2f} ft NAVD88  •  flooded ≈ {_flood_km2:.2f} km²"
-                                        if _nflood > 0 else
-                                        f"WL ≈ {_wl_ft:.2f} ft NAVD88  •  no inundation")
-                                _fig = go.Figure(go.Scattermapbox(
-                                    lat=[_clat], lon=[_clon],
-                                    marker=dict(size=0, opacity=0),
-                                    hoverinfo='skip', showlegend=False,
-                                ))
-                                _fig.update_layout(
-                                    mapbox=dict(
-                                        style=_style,
-                                        center=dict(lat=_clat, lon=_clon),
-                                        zoom=_zoom, layers=_layers,
-                                    ),
-                                    margin=dict(l=0, r=0, t=48, b=0),
-                                    height=460,
-                                    title=dict(
-                                        text=(f"<b>{_lbl} — {int(_yr)}</b>"
-                                              f"<br><span style='font-size:15px;color:#374151'>{_sub}</span>"),
-                                        x=0.01, font=dict(size=19),
-                                    ),
+                                _note = (f"flooded ≈ {_flood_km2:.2f} km²" if _nflood > 0 else "no inundation")
+                                _tgt = _cols[_k % 2]
+                                # Title ABOVE the image (separate element — cannot overlap the figure).
+                                _tgt.markdown(
+                                    f"**{_lbl} — {int(_yr)}**<br>"
+                                    f"<span style='font-size:0.95rem;color:#374151'>"
+                                    f"WL ≈ {_wl_ft:.2f} ft NAVD88 &nbsp;•&nbsp; {_note}</span>",
+                                    unsafe_allow_html=True,
                                 )
-                                _cols[_k % 2].plotly_chart(_fig, use_container_width=True)
+                                _png = fdem.compose_flood_png(_base_img, _depth)
+                                _tgt.image(_png, use_container_width=True)
                                 _k += 1
 
                     st.caption(
-                        f"Bathtub model (no hydraulic connectivity). Terrain: USGS 3DEP 1/3 arc-second "
-                        f"(~10 m source, displayed at ~{_res_m:.0f} m). Basemap © OpenStreetMap "
-                        "contributors / © CARTO. 3DEP is bare-earth land elevation, so open water is "
-                        "shown transparent (Z ≤ 0)."
+                        f"Bathtub model (no hydraulic connectivity); open water (Z ≤ 0) hidden. Terrain: "
+                        f"USGS 3DEP 1/3 arc-second (~10 m), displayed at ~{_res_m:.0f} m. Basemap: "
+                        f"{_base_label} — © OpenStreetMap contributors / © CARTO."
                     )
 
     # ========================================================================
