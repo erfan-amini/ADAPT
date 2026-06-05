@@ -722,19 +722,27 @@ def mapbox_zoom_for_bbox(extent, width_px=340, height_px=420, pad=1.06):
     return max(1.0, min(16.0, min(z_lon, z_lat)))
 
 
-def legend_html():
-    """Inline HTML legend for the discrete depth bins (feet)."""
+def legend_html(area_note=None):
+    """Large, readable inline HTML legend for the discrete depth bins (feet)."""
     labels = ["0–1", "1–2", "2–3", "3–4", "4–5", "5+"]
     items = []
     for (r, g, b), lab in zip(WS_COLORS, labels):
         items.append(
-            f'<span style="display:inline-flex;align-items:center;margin-right:14px;">'
-            f'<span style="width:14px;height:14px;background:rgb({r},{g},{b});'
-            f'display:inline-block;margin-right:5px;border:1px solid #999;"></span>'
-            f'{lab} ft</span>'
+            f'<span style="display:inline-flex;align-items:center;margin-right:24px;margin-bottom:8px;">'
+            f'<span style="width:26px;height:26px;background:rgb({r},{g},{b});'
+            f'display:inline-block;margin-right:9px;border:1px solid #888;border-radius:4px;"></span>'
+            f'<span style="font-size:1.15rem;color:#1f2937;">{lab} ft</span></span>'
         )
-    return ('<div style="font-size:0.85rem;color:#334155;margin:0.25rem 0 0.5rem;">'
-            '<b>Flood depth</b>&nbsp;&nbsp;' + "".join(items) + "</div>")
+    extra = ""
+    if area_note:
+        extra = (f'<div style="font-size:1.1rem;color:#374151;margin-top:4px;">{area_note}</div>')
+    return (
+        '<div style="margin:0.5rem 0 0.9rem;padding:0.6rem 0.8rem;background:#f8fafc;'
+        'border:1px solid #e2e8f0;border-radius:8px;">'
+        '<span style="font-size:1.4rem;font-weight:700;color:#0f172a;margin-right:16px;">Flood depth</span>'
+        '<span style="display:inline-flex;flex-wrap:wrap;align-items:center;vertical-align:middle;">'
+        + "".join(items) + "</span>" + extra + "</div>"
+    )
 
 
 # Namespace so the Flood Maps tab can keep calling fdem.<fn>(...).
@@ -2392,11 +2400,25 @@ def main():
                 "Planning horizons", options=available_years, default=available_years,
                 format_func=lambda y: str(int(y)),
             )
-            _zoom_boost = st.slider(
+            _cz, _cd, _cb = st.columns([0.4, 0.3, 0.3])
+            _zoom_boost = _cz.slider(
                 "Map zoom", min_value=-2.0, max_value=5.0, value=1.0, step=0.5,
-                help="Higher = more zoomed in. Maps are framed to the community by default; "
-                     "increase this to zoom closer.",
+                help="Higher = more zoomed in.",
             )
+            _res_label = _cd.selectbox(
+                "Map detail", ["Standard (~10 m)", "Fine (~5 m)", "Finer (~3 m)"], index=1,
+                help="Finer = sharper at full screen (interpolated from the 10 m source); "
+                     "slower with many maps.",
+            )
+            _res_m = {"Standard (~10 m)": 10.0, "Fine (~5 m)": 5.0, "Finer (~3 m)": 3.0}[_res_label]
+            _base_label = _cb.selectbox(
+                "Basemap", ["Streets (color)", "Light", "Dark"], index=0,
+            )
+            _base_style = {
+                "Streets (color)": "open-street-map",
+                "Light": "carto-positron",
+                "Dark": "carto-darkmatter",
+            }[_base_label]
             st.caption(
                 f"A map is produced for every ticked level × horizon × scenario. For each scenario, SLR is "
                 f"the rise in the median annual-maximum water level from {_base_year} to that horizon."
@@ -2424,7 +2446,7 @@ def main():
                 if _bbox_r is not None:
                     with st.spinner("Fetching terrain (USGS 3DEP) and computing inundation…"):
                         try:
-                            _Zm, _ext = _cached_dem_roi(_bbox_r, 10.0)
+                            _Zm, _ext = _cached_dem_roi(_bbox_r, _res_m)
                         except Exception as _e:
                             st.error(
                                 "Could not load terrain for this area from USGS 3DEP "
@@ -2447,7 +2469,7 @@ def main():
                     if _Zm is not None:
                         _zland = np.isfinite(_Zm) & (_Zm > 0)
                         st.write(
-                            f"DEM grid: {_Zm.shape[0]} × {_Zm.shape[1]} cells (~10 m)  •  "
+                            f"DEM grid: {_Zm.shape[0]} × {_Zm.shape[1]} cells (~{_res_m:.0f} m)  •  "
                             f"land cells: {int(_zland.sum())}  •  elevation "
                             f"{np.nanmin(_Zm):.1f} to {np.nanmax(_Zm):.1f} m NAVD88"
                         )
@@ -2472,16 +2494,19 @@ def main():
                             for _yr in _years_sel:
                                 _wl_ft = _base_lv + _slr(_scn, _yr)
                                 _depth = fdem.bathtub_depth_ft(_Zm, _wl_ft)
-                                _tgt = _cols[_k % 2]
-                                if not np.isfinite(_depth).any():
-                                    _tgt.info(
-                                        f"**{_lbl} — {int(_yr)}**  \n"
-                                        f"No inundation at ≈ {_wl_ft:.2f} ft NAVD88."
-                                    )
-                                    _k += 1
-                                    continue
-                                _uri = fdem.depth_to_rgba_data_uri(_depth)
-                                _flood_km2 = float(np.isfinite(_depth).sum()) * _cell_m2 / 1e6
+                                _nflood = int(np.isfinite(_depth).sum())
+                                _flood_km2 = _nflood * _cell_m2 / 1e6
+                                # Always show the basemap; add the overlay only if there is flooding.
+                                _layers = []
+                                if _nflood > 0:
+                                    _layers = [dict(
+                                        sourcetype="image",
+                                        source=fdem.depth_to_rgba_data_uri(_depth),
+                                        coordinates=_coords, below="traces", opacity=0.85,
+                                    )]
+                                _sub = (f"WL ≈ {_wl_ft:.2f} ft NAVD88  •  flooded ≈ {_flood_km2:.2f} km²"
+                                        if _nflood > 0 else
+                                        f"WL ≈ {_wl_ft:.2f} ft NAVD88  •  no inundation")
                                 _fig = go.Figure(go.Scattermapbox(
                                     lat=[_clat], lon=[_clon],
                                     marker=dict(size=0, opacity=0),
@@ -2489,30 +2514,26 @@ def main():
                                 ))
                                 _fig.update_layout(
                                     mapbox=dict(
-                                        style="carto-positron",
+                                        style=_base_style,
                                         center=dict(lat=_clat, lon=_clon),
-                                        zoom=_zoom,
-                                        layers=[dict(
-                                            sourcetype="image", source=_uri,
-                                            coordinates=_coords, below="traces", opacity=0.85,
-                                        )],
+                                        zoom=_zoom, layers=_layers,
                                     ),
-                                    margin=dict(l=0, r=0, t=34, b=0),
-                                    height=420,
+                                    margin=dict(l=0, r=0, t=48, b=0),
+                                    height=460,
                                     title=dict(
-                                        text=(f"{_lbl} — {int(_yr)}"
-                                              f"<br><sub>Water level ≈ {_wl_ft:.2f} ft NAVD88  •  "
-                                              f"flooded land ≈ {_flood_km2:.2f} km²</sub>"),
-                                        x=0.01, font=dict(size=12),
+                                        text=(f"<b>{_lbl} — {int(_yr)}</b>"
+                                              f"<br><span style='font-size:15px;color:#374151'>{_sub}</span>"),
+                                        x=0.01, font=dict(size=19),
                                     ),
                                 )
-                                _tgt.plotly_chart(_fig, use_container_width=True)
+                                _cols[_k % 2].plotly_chart(_fig, use_container_width=True)
                                 _k += 1
 
                     st.caption(
-                        "Bathtub model (no hydraulic connectivity). Terrain: USGS 3DEP 1/3 arc-second, "
-                        "public domain. Basemap © OpenStreetMap contributors • © CARTO. 3DEP is bare-earth "
-                        "land elevation, so open water is shown transparent (Z ≤ 0)."
+                        f"Bathtub model (no hydraulic connectivity). Terrain: USGS 3DEP 1/3 arc-second "
+                        f"(~10 m source, displayed at ~{_res_m:.0f} m). Basemap © OpenStreetMap "
+                        "contributors / © CARTO. 3DEP is bare-earth land elevation, so open water is "
+                        "shown transparent (Z ≤ 0)."
                     )
 
     # ========================================================================
