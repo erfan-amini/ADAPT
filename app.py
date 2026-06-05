@@ -2107,37 +2107,44 @@ def main():
             )
         else:
             _wl = loc_entry.get('water_levels', {}) if loc_entry else {}
-            _pct_df = _wl.get(scenario)
-            if _pct_df is not None and not _pct_df.empty:
-                _base_year = int(_pct_df['Year'].min())
-            else:
-                _base_year = 2025
+            # SLR scenario keys present in the bundle (exclude raw MC sheets)
+            _scn_keys = [k for k in _wl.keys() if not k.endswith('_mc')]
+            _scn_label = {
+                '50th-percentile': 'Intermediate-High SLR (50th pct)',
+                '90th-percentile': 'High SLR (90th pct)',
+            }
+            _scn_pretty = lambda k: _scn_label.get(k, k)
+            # Present-day prefill comes from a reference scenario (prefer 50th).
+            _ref = '50th-percentile' if '50th-percentile' in _wl else (_scn_keys[0] if _scn_keys else None)
+            _ref_df = _wl.get(_ref)
+            _base_year = int(_ref_df['Year'].min()) if (_ref_df is not None and not _ref_df.empty) else 2025
 
-            def _lvl(year, col):
-                if _pct_df is None or _pct_df.empty or col not in _pct_df.columns:
+            def _lvl(df, year, col):
+                if df is None or df.empty or col not in df.columns:
                     return None
-                i = (_pct_df['Year'] - year).abs().idxmin()
-                return float(_pct_df.loc[i, col])
+                i = (df['Year'] - year).abs().idxmin()
+                return float(df.loc[i, col])
 
-            def _slr(year):
-                a, b = _lvl(year, 'P50'), _lvl(_base_year, 'P50')
+            def _slr(scn_key, year):
+                df = _wl.get(scn_key)
+                a, b = _lvl(df, year, 'P50'), _lvl(df, _base_year, 'P50')
                 return (a - b) if (a is not None and b is not None) else 0.0
 
             _pf = {
-                'annual': _lvl(_base_year, 'P50'),
-                'ten':    _lvl(_base_year, 'P90'),
-                'one':    _lvl(_base_year, 'P99'),
+                'annual': _lvl(_ref_df, _base_year, 'P50'),
+                'ten':    _lvl(_ref_df, _base_year, 'P90'),
+                'one':    _lvl(_ref_df, _base_year, 'P99'),
             }
-            if _pct_df is None or _pct_df.empty:
+            if not _scn_keys:
                 st.warning(
-                    "No Monte-Carlo water-level data found for this location, so the three "
-                    "flood types aren't prefilled and sea-level rise can't be derived "
-                    "(future levels will equal the values you enter). You can still enter levels manually."
+                    "No Monte-Carlo water-level data found for this location, so the three flood types "
+                    "aren't prefilled and sea-level rise can't be derived (future levels will equal what "
+                    "you enter). You can still enter levels manually."
                 )
 
             st.markdown(
-                f"**Present-day base levels** (ft NAVD88). The first three are prefilled from the "
-                f"{_base_year} water-level percentiles for the **{scenario}** scenario; edit or untick any row. "
+                f"**Present-day base levels** (ft NAVD88) — the same for both SLR scenarios. The first three "
+                f"are prefilled from the {_base_year} water-level percentiles; edit or untick any row. "
                 f"High-tide and monthly flooding are optional — tick and enter a level to include them."
             )
 
@@ -2166,42 +2173,70 @@ def main():
                 if _inc:
                     _rows.append((_lbl, float(_lv)))
 
-            _years_sel = st.multiselect(
+            _c_scn, _c_yr = st.columns(2)
+            _scn_sel = _c_scn.multiselect(
+                "SLR scenarios", options=_scn_keys, default=_scn_keys, format_func=_scn_pretty,
+            )
+            _years_sel = _c_yr.multiselect(
                 "Planning horizons", options=available_years, default=available_years,
                 format_func=lambda y: str(int(y)),
             )
             st.caption(
-                f"Sea-level-rise scenario follows the sidebar selection (**{scenario}**). SLR for each horizon "
-                f"is the rise in the median annual-maximum water level from {_base_year} to that year."
+                f"A map is produced for every ticked level × horizon × scenario. For each scenario, SLR is "
+                f"the rise in the median annual-maximum water level from {_base_year} to that horizon."
             )
 
             if not _rows:
                 st.info("Tick at least one flood level to generate maps.")
             elif not _years_sel:
                 st.info("Select at least one planning horizon.")
+            elif not _scn_sel:
+                st.info("Select at least one SLR scenario.")
             elif st.button("🌊 Generate flood maps", type="primary"):
+                _lonA = df_buildings['longitude'].to_numpy(dtype=float)
+                _latA = df_buildings['latitude'].to_numpy(dtype=float)
+                _lonA, _latA, _swapped = fdem.maybe_swap_lonlat(_lonA, _latA)
                 try:
-                    _bbox = fdem.roi_from_lonlat(
-                        df_buildings['longitude'].to_numpy(),
-                        df_buildings['latitude'].to_numpy(), buffer_m=500.0,
-                    )
+                    _bbox = fdem.roi_from_lonlat(_lonA, _latA, buffer_m=600.0)
                     _bbox_r = tuple(round(v, 5) for v in _bbox)
                 except Exception as _e:
                     st.error(f"Could not determine the map area: {_e}")
                     _bbox_r = None
 
                 _Zm = None
+                _ext = None
                 if _bbox_r is not None:
                     with st.spinner("Fetching terrain (USGS 3DEP) and computing inundation…"):
                         try:
                             _Zm, _ext = _cached_dem_roi(_bbox_r, 10.0)
                         except Exception as _e:
                             st.error(
-                                "Could not load terrain for this area from USGS 3DEP. "
-                                "This needs internet access at runtime. Details: %s" % _e
+                                "Could not load terrain for this area from USGS 3DEP "
+                                "(this needs internet access at runtime). Details: %s" % _e
                             )
 
-                if _Zm is not None:
+                with st.expander("Map-area diagnostics"):
+                    _fin = np.isfinite(_lonA) & np.isfinite(_latA)
+                    st.write(
+                        f"Buildings with coordinates: {int(_fin.sum())} of {len(_lonA)}"
+                        + ("  •  longitude/latitude looked transposed and were auto-swapped" if _swapped else "")
+                    )
+                    if _fin.any():
+                        st.write("lon  min / median / max: "
+                                 f"{np.nanmin(_lonA[_fin]):.4f} / {np.nanmedian(_lonA[_fin]):.4f} / {np.nanmax(_lonA[_fin]):.4f}")
+                        st.write("lat  min / median / max: "
+                                 f"{np.nanmin(_latA[_fin]):.4f} / {np.nanmedian(_latA[_fin]):.4f} / {np.nanmax(_latA[_fin]):.4f}")
+                    if _bbox_r is not None:
+                        st.write(f"Region of interest (lon_min, lat_min, lon_max, lat_max): {_bbox_r}")
+                    if _Zm is not None:
+                        _zland = np.isfinite(_Zm) & (_Zm > 0)
+                        st.write(
+                            f"DEM grid: {_Zm.shape[0]} × {_Zm.shape[1]} cells (~10 m)  •  "
+                            f"land cells: {int(_zland.sum())}  •  elevation "
+                            f"{np.nanmin(_Zm):.1f} to {np.nanmax(_Zm):.1f} m NAVD88"
+                        )
+
+                if _Zm is not None and _ext is not None:
                     st.markdown(fdem.legend_html(), unsafe_allow_html=True)
                     _zoom = fdem.mapbox_zoom_for_bbox(_ext)
                     _clat = 0.5 * (_ext[1] + _ext[3])
@@ -2209,44 +2244,53 @@ def main():
                     _coords = [[_ext[0], _ext[3]], [_ext[2], _ext[3]],
                                [_ext[2], _ext[1]], [_ext[0], _ext[1]]]
 
-                    _cols = st.columns(2)
-                    _k = 0
-                    for _lbl, _base_lv in _rows:
-                        for _yr in _years_sel:
-                            _wl_ft = _base_lv + _slr(_yr)
-                            _depth = fdem.bathtub_depth_ft(_Zm, _wl_ft)
-                            _uri = fdem.depth_to_rgba_data_uri(_depth)
-                            _fig = go.Figure(go.Scattermapbox(
-                                lat=[_clat], lon=[_clon],
-                                marker=dict(size=0, opacity=0),
-                                hoverinfo='skip', showlegend=False,
-                            ))
-                            _fig.update_layout(
-                                mapbox=dict(
-                                    style="carto-positron",
-                                    center=dict(lat=_clat, lon=_clon),
-                                    zoom=_zoom,
-                                    layers=[dict(
-                                        sourcetype="image", source=_uri,
-                                        coordinates=_coords, below="traces", opacity=0.85,
-                                    )],
-                                ),
-                                margin=dict(l=0, r=0, t=30, b=0),
-                                height=360,
-                                title=dict(
-                                    text=(f"{_lbl} — {int(_yr)}"
-                                          f"<br><sub>Water level ≈ {_wl_ft:.2f} ft NAVD88 "
-                                          f"({scenario})</sub>"),
-                                    x=0.01, font=dict(size=12),
-                                ),
-                            )
-                            _cols[_k % 2].plotly_chart(_fig, use_container_width=True)
-                            _k += 1
+                    for _scn in _scn_sel:
+                        st.markdown(f"##### {_scn_pretty(_scn)}")
+                        _cols = st.columns(2)
+                        _k = 0
+                        for _lbl, _base_lv in _rows:
+                            for _yr in _years_sel:
+                                _wl_ft = _base_lv + _slr(_scn, _yr)
+                                _depth = fdem.bathtub_depth_ft(_Zm, _wl_ft)
+                                _tgt = _cols[_k % 2]
+                                if not np.isfinite(_depth).any():
+                                    _tgt.info(
+                                        f"**{_lbl} — {int(_yr)}**  \n"
+                                        f"No inundation at ≈ {_wl_ft:.2f} ft NAVD88."
+                                    )
+                                    _k += 1
+                                    continue
+                                _uri = fdem.depth_to_rgba_data_uri(_depth)
+                                _fig = go.Figure(go.Scattermapbox(
+                                    lat=[_clat], lon=[_clon],
+                                    marker=dict(size=0, opacity=0),
+                                    hoverinfo='skip', showlegend=False,
+                                ))
+                                _fig.update_layout(
+                                    mapbox=dict(
+                                        style="carto-positron",
+                                        center=dict(lat=_clat, lon=_clon),
+                                        zoom=_zoom,
+                                        layers=[dict(
+                                            sourcetype="image", source=_uri,
+                                            coordinates=_coords, below="traces", opacity=0.85,
+                                        )],
+                                    ),
+                                    margin=dict(l=0, r=0, t=30, b=0),
+                                    height=360,
+                                    title=dict(
+                                        text=(f"{_lbl} — {int(_yr)}"
+                                              f"<br><sub>Water level ≈ {_wl_ft:.2f} ft NAVD88</sub>"),
+                                        x=0.01, font=dict(size=12),
+                                    ),
+                                )
+                                _tgt.plotly_chart(_fig, use_container_width=True)
+                                _k += 1
 
                     st.caption(
                         "Bathtub model (no hydraulic connectivity). Terrain: USGS 3DEP 1/3 arc-second, "
                         "public domain. Basemap © OpenStreetMap contributors • © CARTO. 3DEP is bare-earth "
-                        "land elevation, so open water is shown as transparent (Z ≤ 0)."
+                        "land elevation, so open water is shown transparent (Z ≤ 0)."
                     )
 
     # ========================================================================

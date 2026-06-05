@@ -86,22 +86,59 @@ def dem_tiles_for_bbox(bbox):
     return tiles
 
 
-def roi_from_lonlat(lon, lat, buffer_m=500.0):
-    """Bounding box around point coordinates, padded by buffer_m metres.
+def roi_from_lonlat(lon, lat, buffer_m=600.0, min_span_km=1.5, max_span_km=25.0):
+    """Robust bounding box around point coordinates.
 
-    Returns (lon_min, lat_min, lon_max, lat_max).
+    Centred on the MEDIAN coordinate. Points farther than a MAD-based
+    threshold from the centre are dropped as outliers before the box is
+    sized, so a handful of stray/garbage coordinates can't blow the extent
+    up (the failure that produced the whole-region map). Padded by buffer_m
+    and clamped to [min_span_km, max_span_km]. Returns
+    (lon_min, lat_min, lon_max, lat_max).
     """
     lon = np.asarray(lon, dtype=float)
     lat = np.asarray(lat, dtype=float)
-    lon = lon[np.isfinite(lon)]
-    lat = lat[np.isfinite(lat)]
-    if lon.size == 0 or lat.size == 0:
+    m = np.isfinite(lon) & np.isfinite(lat)
+    lon, lat = lon[m], lat[m]
+    if lon.size == 0:
         raise ValueError("No finite coordinates to build a region of interest.")
-    latc = float(np.mean(lat))
-    pad_lat = buffer_m / 111320.0
-    pad_lon = buffer_m / (111320.0 * max(0.1, math.cos(math.radians(latc))))
-    return (float(lon.min()) - pad_lon, float(lat.min()) - pad_lat,
-            float(lon.max()) + pad_lon, float(lat.max()) + pad_lat)
+
+    clon = float(np.median(lon))
+    clat = float(np.median(lat))
+    m_per_lat = 111320.0
+    m_per_lon = 111320.0 * max(0.1, math.cos(math.radians(clat)))
+
+    dx = (lon - clon) * m_per_lon
+    dy = (lat - clat) * m_per_lat
+    dist = np.hypot(dx, dy)
+    med = float(np.median(dist))
+    mad = float(np.median(np.abs(dist - med)))
+    thr = max(med + 5.0 * 1.4826 * mad, 2000.0)   # keep within ~max(., 2 km)
+    keep = dist <= thr
+    if not keep.any():
+        keep = np.ones_like(dist, dtype=bool)
+    lon_k, lat_k = lon[keep], lat[keep]
+
+    half_lo = 500.0 * min_span_km
+    half_hi = 500.0 * max_span_km
+    hx_m = min(max((lon_k.max() - lon_k.min()) * 0.5 * m_per_lon + buffer_m, half_lo), half_hi)
+    hy_m = min(max((lat_k.max() - lat_k.min()) * 0.5 * m_per_lat + buffer_m, half_lo), half_hi)
+    dlon = hx_m / m_per_lon
+    dlat = hy_m / m_per_lat
+    return (clon - dlon, clat - dlat, clon + dlon, clat + dlat)
+
+
+def maybe_swap_lonlat(lon, lat):
+    """Guard against transposed columns. In the US longitude is large-negative
+    (~-65..-125) and latitude is ~20..50, so if |lon| looks like a latitude and
+    |lat| looks like a longitude, swap them. Returns (lon, lat, swapped)."""
+    lon = np.asarray(lon, dtype=float)
+    lat = np.asarray(lat, dtype=float)
+    mlon = np.nanmedian(np.abs(lon))
+    mlat = np.nanmedian(np.abs(lat))
+    if np.isfinite(mlon) and np.isfinite(mlat) and mlon < 60.0 and mlat > 60.0:
+        return lat, lon, True
+    return lon, lat, False
 
 
 def read_dem_roi(bbox, target_res_m=10.0):
@@ -128,6 +165,14 @@ def read_dem_roi(bbox, target_res_m=10.0):
     dlon = target_res_m / (111320.0 * max(0.1, math.cos(math.radians(latc))))
     nlon = max(2, int(round((lon_max - lon_min) / dlon)))
     nlat = max(2, int(round((lat_max - lat_min) / dlat)))
+
+    # Safety: never build an absurdly large grid (e.g. if the ROI is still
+    # big). Coarsen uniformly so the longer side stays <= 2500 cells.
+    longest = max(nlon, nlat)
+    if longest > 2500:
+        shrink = longest / 2500.0
+        nlon = max(2, int(nlon / shrink))
+        nlat = max(2, int(nlat / shrink))
 
     dst_transform = transform_from_bounds(lon_min, lat_min, lon_max, lat_max,
                                           nlon, nlat)
@@ -224,14 +269,15 @@ def depth_to_rgba_data_uri(depth_ft):
     return "data:image/png;base64," + base64.b64encode(buf.getvalue()).decode("ascii")
 
 
-def mapbox_zoom_for_bbox(extent, zoom_out=0.4):
-    """Approximate a Plotly mapbox zoom that frames the bbox extent."""
+def mapbox_zoom_for_bbox(extent, width_px=700, height_px=360, pad=1.12):
+    """Approximate a Plotly mapbox zoom that frames the bbox in a typical
+    panel. Fits the more constraining of the lon/lat spans."""
     lon_min, lat_min, lon_max, lat_max = extent
-    lon_span = max(lon_max - lon_min, 1e-4)
-    lat_span = max(lat_max - lat_min, 1e-4)
-    z_lon = math.log2(360.0 / lon_span)
-    z_lat = math.log2(180.0 / lat_span)
-    return max(1.0, min(z_lon, z_lat) - zoom_out)
+    lon_span = max((lon_max - lon_min) * pad, 1e-4)
+    lat_span = max((lat_max - lat_min) * pad, 1e-4)
+    z_lon = math.log2(360.0 / lon_span) + math.log2(max(width_px, 1) / 512.0)
+    z_lat = math.log2(180.0 / lat_span) + math.log2(max(height_px, 1) / 512.0)
+    return max(1.0, min(15.0, min(z_lon, z_lat)))
 
 
 def legend_html():
