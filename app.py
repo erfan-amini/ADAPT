@@ -2683,70 +2683,97 @@ def main():
                 return _v
         return _LOC_BLURB_DEFAULT
 
-    def _frag_parse_csv(_file):
-        """Read an uploaded depth-damage CSV -> (DataFrame, {col: depth_ft}, key_col)."""
-        _df = pd.read_csv(_file)
-        depth_map = {}
+    # --- Parse a FAST curve Description into (stories, basement, zone) ---
+    def _frag_parse_desc(desc):
+        d = str(desc).lower()
+        if "split" in d:
+            stories = "Split level"
+        elif "three or more" in d or "3 or more" in d:
+            stories = "3+ stories"
+        elif "two floor" in d or "two stor" in d or "2 floor" in d:
+            stories = "2 stories"
+        elif "one floor" in d or "one stor" in d or "1 floor" in d:
+            stories = "1 story"
+        elif "1to2" in d or "1 to 2" in d:
+            stories = "1\u20132 stories"
+        else:
+            stories = None
+        if "w/ basement" in d or "with basement" in d or "sub-grade" in d or "subgrade" in d:
+            basement = "With basement"
+        elif "no basement" in d or "slab" in d or "no_basement" in d:
+            basement = "No basement"
+        else:
+            basement = None
+        if "coastal a or v" in d:
+            zone = "Coastal A/V"
+        elif "v-zone" in d or "v zone" in d or "coastal v" in d:
+            zone = "V-Zone"
+        elif "a-zone" in d or "a zone" in d or "coastal a" in d:
+            zone = "A-Zone"
+        else:
+            zone = None
+        return stories, basement, zone
+
+    def _frag_story_key(x):
+        s = str(x)
+        m = _re.match(r"(\d+)", s)
+        if m:
+            return (0, int(m.group(1)))
+        if "split" in s.lower():
+            return (1, 0)
+        return (2, s)
+
+    def _frag_curve_long(_df):
+        """A FAST DmgFn table -> tidy rows [fnid, occ, stories, basement, zone, desc, depth, pct]."""
+        idcol = next((c for c in _df.columns if str(c).strip().lower().endswith("dmgfnid")),
+                     _df.columns[0])
+        depth_cols = {}
         for c in _df.columns:
             cs = str(c).strip().lower()
-            mm = _re.fullmatch(r"m(\d+(?:\.\d+)?)", cs)
-            pp = _re.fullmatch(r"p(\d+(?:\.\d+)?)", cs)
+            mm = _re.fullmatch(r"m(\d+)", cs)
+            pp = _re.fullmatch(r"p(\d+)", cs)
             if mm:
-                depth_map[c] = -float(mm.group(1))
+                depth_cols[c] = -int(mm.group(1))
             elif pp:
-                depth_map[c] = float(pp.group(1))
-        if not depth_map:  # fallback: numeric headers like -4 ... 24
-            for c in _df.columns:
-                try:
-                    depth_map[c] = float(str(c).strip())
-                except Exception:
-                    pass
-        key_col = None
-        for cand in ["SpecificOccupId", "Occupancy", "Occ", "SOID",
-                     "Specific_Occup", "Description", "DmgFnId"]:
-            if cand in _df.columns:
-                key_col = cand
-                break
-        if key_col is None:
-            nondepth = [c for c in _df.columns if c not in depth_map]
-            key_col = nondepth[0] if nondepth else _df.columns[0]
-        return _df, depth_map, key_col
-
-    def _frag_split_soid(soid):
-        """Parse a Hazus SOID like 'RES1-2SWB' -> (occ, stories, basement)."""
-        s = str(soid).strip().upper()
-        m = _re.match(r"^([A-Z]+\d+[A-Z]?)-(\d+|S)S?([NW]B)?$", s)
-        if m:
-            occ = m.group(1)
-            st_raw = m.group(2)
-            stories = ("Split" if st_raw == "S" else st_raw)
-            base = m.group(3)
-            basement = ("With basement" if base == "WB"
-                        else "No basement" if base == "NB" else "\u2014")
-            return occ, stories, basement
-        m2 = _re.match(r"^([A-Z]+\d+[A-Z]?)", s)
-        return (m2.group(1) if m2 else s), "\u2014", "\u2014"
-
-    def _frag_long(_parsed):
-        """(df, depth_map, key_col) -> tidy rows: occ, stories, basement, soid, depth, pct."""
-        _df, depth_map, key_col = _parsed
+                depth_cols[c] = int(pp.group(1))
+        occ_col = next((c for c in _df.columns if str(c).strip().lower() == "occupancy"), None)
+        desc_col = next((c for c in _df.columns if str(c).strip().lower() == "description"), None)
         rows = []
         for _, r in _df.iterrows():
-            occ, stories, basement = _frag_split_soid(r[key_col])
-            for c, d in depth_map.items():
+            occ = str(r[occ_col]).strip() if occ_col else ""
+            desc = str(r[desc_col]).strip() if desc_col else ""
+            fnid = r[idcol]
+            stories, basement, zone = _frag_parse_desc(desc)
+            for c, d in depth_cols.items():
                 try:
                     v = float(r[c])
                 except Exception:
                     continue
-                rows.append((occ, stories, basement, str(r[key_col]).strip(), d, v))
-        return pd.DataFrame(rows, columns=["occ", "stories", "basement", "soid", "depth", "pct"])
+                rows.append((fnid, occ, stories, basement, zone, desc, d, v))
+        return pd.DataFrame(
+            rows, columns=["fnid", "occ", "stories", "basement", "zone", "desc", "depth", "pct"]
+        )
+
+    def _frag_map_lookup(_map, soid, idcol, zonecol):
+        """SOID + hazard column -> DmgFnId (mirrors the MATLAB calc_damage_pcts)."""
+        if _map is None or not soid:
+            return None
+        try:
+            keycol = _map.columns[0]  # SOccupId
+            m = _map[_map[keycol].astype(str).str.strip().str.upper() == str(soid).strip().upper()]
+            if zonecol in m.columns:
+                m = m[pd.to_numeric(m[zonecol], errors="coerce") == 1]
+            idc = next((c for c in _map.columns if str(c).strip().lower() == idcol.lower()), None)
+            if (not m.empty) and idc is not None:
+                return m.iloc[0][idc]
+        except Exception:
+            pass
+        return None
 
     def _try_frag_autoload():
-        """Find the FEMA/Hazus depth-damage CSVs already sitting in the app
-        folder (or a few common subfolders) and load them automatically, so the
-        user doesn't have to upload anything. A file qualifies if it has >=3
-        m*/p* depth columns; struct vs content is decided by the filename (the
-        'Final' SOID->id mapping files have no depth columns and are skipped)."""
+        """Find the FEMA/Hazus FAST CSVs already sitting in the app folder and load
+        them, so nothing needs to be uploaded. Pulls the two depth-damage function
+        tables (…DmgFn) and the two SOID->FnId mapping tables (…DmgFinal)."""
         if ss.get("_frag_autoload_tried"):
             return
         ss["_frag_autoload_tried"] = True
@@ -2757,39 +2784,47 @@ def main():
                 if _f not in seen:
                     seen.add(_f)
                     cands.append(_f)
-        struct_p = cont_p = None
+        sfn = cfn = smap = cmap = None
         for _p in cands:
             try:
                 _head = pd.read_csv(_p, nrows=4)
             except Exception:
                 continue
-            _ndepth = sum(1 for c in _head.columns
-                          if _re.fullmatch(r"[mp]\d+(?:\.\d+)?", str(c).strip().lower()))
-            if _ndepth < 3:
-                continue
-            _fl = os.path.basename(_p).lower()
-            if "cont" in _fl:
-                cont_p = cont_p or _p
-            else:
-                struct_p = struct_p or _p
-        if struct_p and cont_p:
+            cols = [str(c).strip().lower() for c in _head.columns]
+            ndepth = sum(1 for c in cols if _re.fullmatch(r"[mp]\d+", c))
+            is_cont = "cont" in os.path.basename(_p).lower()
+            if ndepth >= 3 and "occupancy" in cols:          # …DmgFn (curves)
+                if is_cont:
+                    cfn = cfn or _p
+                else:
+                    sfn = sfn or _p
+            elif "soccupid" in cols:                          # …DmgFinal (mapping)
+                if is_cont:
+                    cmap = cmap or _p
+                else:
+                    smap = smap or _p
+        if sfn and cfn:
             try:
-                ss["_frag_S"] = _frag_long(_frag_parse_csv(struct_p))
-                ss["_frag_C"] = _frag_long(_frag_parse_csv(cont_p))
-                ss["_frag_src"] = (os.path.basename(struct_p), os.path.basename(cont_p))
-            except Exception:
-                pass
+                ss["_frag_S"] = _frag_curve_long(pd.read_csv(sfn))
+                ss["_frag_C"] = _frag_curve_long(pd.read_csv(cfn))
+                ss["_frag_Smap"] = pd.read_csv(smap) if smap else None
+                ss["_frag_Cmap"] = pd.read_csv(cmap) if cmap else None
+                ss["_frag_src"] = (os.path.basename(sfn), os.path.basename(cfn))
+            except Exception as _e:
+                ss["_frag_err"] = str(_e)
 
     def render_fragility_curves(building_row=None, ctx="frag"):
-        # 1) ensure curve data is loaded (auto-load from the app folder first)
+        # Auto-load the curves already shipped with the app.
         if ss.get("_frag_S") is None or ss.get("_frag_C") is None:
             _try_frag_autoload()
-        if ss.get("_frag_S") is None or ss.get("_frag_C") is None:
+        S = ss.get("_frag_S")
+        C = ss.get("_frag_C")
+        if S is None or C is None or S.empty:
             st.info(
                 "The FEMA/Hazus depth-damage curve files weren't found in the app folder. "
-                "Drop the FAST **structure** and **content** depth-damage function CSVs next "
-                "to `app.py` (or upload them here once). Each has one % value per flood depth "
-                "and a column identifying the occupancy/structure type, e.g. `RES1-2SNB`."
+                "Expected the FAST tables `flBldgStructDmgFn.csv` and `flBldgContDmgFn.csv` "
+                "(and optionally the `…DmgFinal.csv` mapping tables) next to `app.py`. "
+                "You can also load them here once."
             )
             cA, cB = st.columns(2)
             with cA:
@@ -2798,89 +2833,122 @@ def main():
                 upC = st.file_uploader("Content depth-damage CSV", type=["csv"], key=f"{ctx}_upC")
             if upS is not None and upC is not None:
                 try:
-                    ss["_frag_S"] = _frag_long(_frag_parse_csv(upS))
-                    ss["_frag_C"] = _frag_long(_frag_parse_csv(upC))
+                    ss["_frag_S"] = _frag_curve_long(pd.read_csv(upS))
+                    ss["_frag_C"] = _frag_curve_long(pd.read_csv(upC))
                     st.rerun()
                 except Exception as _e:
                     st.error(f"Could not parse the curve files: {_e}")
             return
 
-        S = ss["_frag_S"]
-        C = ss["_frag_C"]
-        if S is None or S.empty:
-            st.warning("No depth-damage rows were detected in the uploaded structure file.")
-            if st.button("Clear uploaded curves", key=f"{ctx}_clr0"):
-                ss.pop("_frag_S", None)
-                ss.pop("_frag_C", None)
-                st.rerun()
+        occs = sorted(S["occ"].dropna().unique())
+        if not occs:
+            st.warning("No occupancy classes were detected in the curve files.")
             return
 
-        occs = sorted(S["occ"].unique())
+        def _occ_label(o):
+            return f"{o} \u2014 {_OCC_FULL[o]}" if o in _OCC_FULL else o
 
-        # derive defaults from a building row when embedded
-        bld_occ = bld_base = None
+        # Defaults / exact curve when embedded for a specific building.
+        bld_occ = bld_zone = bld_base = None
+        hl_S = hl_C = None
         if building_row is not None:
-            raw_occ = str(building_row.get("occupancy_type", "") or building_row.get("SOID", "") or "")
-            bld_occ, _bs, bld_base = _frag_split_soid(raw_occ)
-            if bld_occ not in occs:
-                bld_occ = next((o for o in occs if raw_occ.upper().startswith(o)), None)
+            _raw = str(building_row.get("occupancy_type", "") or "").strip().upper()
+            bld_occ = _raw if _raw in occs else next((o for o in occs if _raw.startswith(o)), None)
+            _soid = str(building_row.get("SOID", "") or "").strip()
+            if _soid:
+                hl_S = _frag_map_lookup(ss.get("_frag_Smap"), _soid, "BldgDmgFnId", "HazardCA")
+                hl_C = _frag_map_lookup(ss.get("_frag_Cmap"), _soid, "ContDmgFnId", "HazardCA")
+            # Default the selectors to the resolved curve's own attributes so the
+            # building's exact curve is actually inside the filtered overlay.
+            if hl_S is not None and (S["fnid"] == hl_S).any():
+                _hrow = S[S["fnid"] == hl_S].iloc[0]
+                bld_occ = _hrow["occ"] or bld_occ
+                bld_zone = _hrow["zone"]
+                bld_base = _hrow["basement"]
+            elif _soid:
+                bld_base = "With basement" if _soid.upper().endswith("B") else "No basement"
 
-        c1, c2 = st.columns(2)
+        _default_occ = (bld_occ if bld_occ in occs
+                        else "RES1" if "RES1" in occs else occs[0])
+
+        c1, c2, c3 = st.columns(3)
         with c1:
-            _oi = occs.index(bld_occ) if (bld_occ in occs) else 0
             sel_occ = st.selectbox(
-                "Occupancy", occs, index=_oi, key=f"{ctx}_occ",
-                format_func=lambda o: (f"{o} \u2014 {_OCC_FULL[o]}" if o in _OCC_FULL else o),
+                "Occupancy", occs, index=occs.index(_default_occ),
+                format_func=_occ_label, key=f"{ctx}_occ",
             )
-        bases = sorted(S[S["occ"] == sel_occ]["basement"].unique())
+        subO = S[S["occ"] == sel_occ]
+        zones = [z for z in ["A-Zone", "V-Zone", "Coastal A/V", "Riverine"]
+                 if z in set(subO["zone"].dropna())]
         with c2:
-            if len(bases) > 1:
-                _bi = bases.index(bld_base) if (bld_base in bases) else 0
-                sel_base = st.selectbox("Basement", bases, index=_bi, key=f"{ctx}_base")
+            if zones:
+                _zi = (zones.index(bld_zone) if (bld_zone in zones)
+                       else zones.index("A-Zone") if "A-Zone" in zones else 0)
+                sel_zone = st.selectbox("Flood zone", zones, index=_zi, key=f"{ctx}_zone")
             else:
-                sel_base = bases[0] if bases else "\u2014"
-                st.selectbox("Basement", (bases or ["\u2014"]), index=0,
-                             key=f"{ctx}_base", disabled=True)
+                sel_zone = None
+                st.selectbox("Flood zone", ["(not in data)"], index=0, disabled=True, key=f"{ctx}_zone")
+        subZ = subO if sel_zone is None else subO[subO["zone"] == sel_zone]
+        bases = [b for b in ["No basement", "With basement"] if b in set(subZ["basement"].dropna())]
+        with c3:
+            if bases:
+                _bi = bases.index(bld_base) if (bld_base in bases) else 0
+                sel_base = st.selectbox("Basement", bases, index=_bi,
+                                        key=f"{ctx}_base", disabled=(len(bases) == 1))
+            else:
+                sel_base = None
+                st.selectbox("Basement", ["(not in data)"], index=0, disabled=True, key=f"{ctx}_base")
 
-        def _story_key(x):
-            sx = str(x)
-            return (1, 99) if sx == "Split" else (0, int(sx)) if sx.isdigit() else (2, 0)
+        def _filtered(df):
+            sub = df[df["occ"] == sel_occ]
+            if sel_zone is not None:
+                sub = sub[sub["zone"] == sel_zone]
+            if sel_base is not None:
+                sub = sub[(sub["basement"] == sel_base) | (sub["basement"].isna())]
+            return sub
 
-        def _plot(_df, _title):
-            sub = _df[(_df["occ"] == sel_occ) & (_df["basement"] == sel_base)]
+        def _plot(df, title, hl_fnid):
+            sub = _filtered(df)
             if sub.empty:
-                st.info(f"No {_title.lower()} curve for this selection.")
+                st.info(f"No {title.lower()} curve for this selection.")
                 return
+            has_story = sub["stories"].notna().any() and sub["stories"].nunique() > 1
+            series_col = "stories" if has_story else "desc"
             fig = go.Figure()
-            for stv in sorted(sub["stories"].unique(), key=_story_key):
-                _s = sub[sub["stories"] == stv].sort_values("depth")
-                lbl = (f"{stv}-story" if str(stv).isdigit() else str(stv))
+            for sv in sorted(sub[series_col].dropna().unique(), key=_frag_story_key):
+                _s = sub[sub[series_col] == sv].sort_values("depth")
+                is_hl = (hl_fnid is not None) and bool((_s["fnid"] == hl_fnid).any())
+                _name = str(sv)
+                if has_story is False:
+                    _name = (_name[:38] + "\u2026") if len(_name) > 39 else _name
+                if is_hl:
+                    _name += "  \u25c0 this building"
                 fig.add_trace(go.Scatter(
-                    x=_s["depth"], y=_s["pct"], mode="lines+markers", name=lbl,
+                    x=_s["depth"], y=_s["pct"], mode="lines+markers",
+                    name=_name, line=dict(width=4 if is_hl else 2),
                 ))
             fig.update_layout(
-                title=_title,
-                xaxis_title="Flood depth above first floor (ft)",
-                yaxis_title="Damage (% of value)",
-                height=380, margin=dict(l=10, r=10, t=42, b=10),
-                legend=dict(orientation="h", y=-0.28),
+                title=title, xaxis_title="Flood depth above first floor (ft)",
+                yaxis_title="Damage (% of value)", height=390,
+                margin=dict(l=10, r=10, t=44, b=10),
+                legend=dict(orientation="h", y=-0.32, font=dict(size=10)),
             )
-            st.plotly_chart(fig, use_container_width=True, key=f"{ctx}_{_title}")
+            st.plotly_chart(fig, use_container_width=True, key=f"{ctx}_{title}")
 
         p1, p2 = st.columns(2)
         with p1:
-            _plot(S, "Structure damage")
+            _plot(S, "Structure damage", hl_S)
         with p2:
-            _plot(C, "Content damage")
+            _plot(C, "Content damage", hl_C)
+
+        _src = ss.get("_frag_src")
+        _srctxt = (f" Source files: {_src[0]} / {_src[1]}." if _src else "")
         st.caption(
-            "Each line is a different number-of-stories variant for the selected occupancy "
-            "and basement condition. Source: uploaded FEMA/Hazus depth-damage functions."
+            "Curves overlay the available number-of-stories variants (or specific-occupancy "
+            "variants) for the selected occupancy, flood zone, and basement condition. "
+            "Depth is measured above the first-floor elevation; values are percent of structure "
+            "or contents value (FEMA/Hazus FAST depth-damage functions)." + _srctxt
         )
-        if building_row is None:
-            if st.button("Replace uploaded curve files", key=f"{ctx}_clr1"):
-                for _k in ("_frag_S", "_frag_C"):
-                    ss.pop(_k, None)
-                st.rerun()
 
     # ========================================================================
     # TAB: FLOOD MAPS — bathtub inundation for user-specified water levels
@@ -7064,10 +7132,11 @@ def main():
     # ========================================================================
     if active == V_FRAG:
         st.markdown(
-            '<p class="tab-description">Explore FEMA/Hazus depth-damage (fragility) curves. '
-            'Pick a building type and condition and the tool overlays the structure- and '
-            'content-damage curves for each number of stories on one plot. Upload your FEMA '
-            'depth-damage curve files once; they are reused here and in the example-building tabs.</p>',
+            '<p class="tab-description">Explore the FEMA/Hazus depth-damage (fragility) curves '
+            'behind the damage model. Pick an occupancy, flood zone, and basement condition, and '
+            'the tool overlays the structure- and content-damage curves for each number of stories '
+            'on one plot. The curves are read directly from the FAST tables shipped with the app. '
+            'In the example-building tabs, the building&#39;s own curve is highlighted.</p>',
             unsafe_allow_html=True,
         )
         render_fragility_curves(building_row=None, ctx="frag_main")
