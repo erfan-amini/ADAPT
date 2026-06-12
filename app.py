@@ -2333,7 +2333,7 @@ def main():
     V_RES = "\U0001f3e0 Residential example"
     V_NONRES = "\U0001f3e2 Non-residential example"
     V_FRAG = "\U0001f4c8 Fragility curves"
-    VIEWS = [V_FLOOD, V_MAP, V_ROADS, V_OVERVIEW, V_DIST, V_RES, V_NONRES, V_FRAG]
+    VIEWS = [V_OVERVIEW, V_FLOOD, V_MAP, V_ROADS, V_DIST, V_RES, V_NONRES, V_FRAG]
 
     def _keyed_container(_key):
         try:
@@ -2341,8 +2341,10 @@ def main():
         except TypeError:
             return st.container()
 
-    # ---- Right-hand vertical navigation rail ----
-    with _keyed_container("adapt_nav_rail"):
+    # ---- Navigation rail (rendered in the sidebar; CSS below flips it to
+    #      the right edge and styles it as the dark ADAPT rail). Using the
+    #      sidebar gives a stable selector across Streamlit versions. ----
+    with st.sidebar:
         if os.path.exists("logo.png"):
             st.image("logo.png", use_container_width=True)
         else:
@@ -2479,50 +2481,56 @@ def main():
     occupancy_label = selected_occupancy if selected_occupancy != "All" else "All Buildings"
 
     # ========================================================================
-    # GLOBAL CSS -- right nav rail (white labels), content offset
+    # GLOBAL CSS -- nav in the sidebar, flipped to the RIGHT, white labels
     # ========================================================================
-    _RAIL_W = 232  # px
     _css = (
         "<style>\n"
-        "section[data-testid=\"stSidebar\"] { display: none !important; }\n"
-        ".block-container { padding-right: __PADR__px !important; }\n"
-        ".st-key-adapt_nav_rail {\n"
-        "    position: fixed; top: 0; right: 0; width: __RAILW__px; height: 100vh;\n"
-        "    padding: 3.75rem 0.85rem 1rem 0.85rem;\n"
-        "    background: linear-gradient(180deg, #0f172a 0%, #1e293b 100%);\n"
-        "    box-shadow: -6px 0 24px rgba(15, 23, 42, 0.18);\n"
-        "    z-index: 1000; overflow-y: auto;\n"
+        # Make the app a flex row and push the sidebar to the right edge.
+        "[data-testid=\"stAppViewContainer\"] { display: flex; }\n"
+        "section[data-testid=\"stSidebar\"] { order: 99; }\n"
+        # Dark ADAPT rail styling on the sidebar.
+        "section[data-testid=\"stSidebar\"] {\n"
+        "    background: linear-gradient(180deg, #0f172a 0%, #1e293b 100%) !important;\n"
+        "    border-left: 1px solid rgba(148,163,184,0.18);\n"
+        "    min-width: 248px !important; max-width: 320px !important;\n"
         "}\n"
+        "section[data-testid=\"stSidebar\"] > div,\n"
+        "section[data-testid=\"stSidebar\"] [data-testid=\"stSidebarContent\"],\n"
+        "section[data-testid=\"stSidebar\"] [data-testid=\"stSidebarUserContent\"] {\n"
+        "    background: transparent !important;\n"
+        "}\n"
+        # Brand block.
         ".adapt-rail-brand {\n"
         "    display: flex; flex-direction: column; align-items: flex-start;\n"
-        "    padding: 0 0.35rem 0.9rem 0.35rem; margin-bottom: 0.6rem;\n"
-        "    border-bottom: 1px solid rgba(148, 163, 184, 0.22);\n"
+        "    padding: 0 0.35rem 0.9rem 0.35rem; margin: 0 0 0.6rem 0;\n"
+        "    border-bottom: 1px solid rgba(148,163,184,0.22);\n"
         "}\n"
         ".adapt-rail-word { font-size: 1.6rem; font-weight: 800; letter-spacing: 0.5px;\n"
         "    color: #38bdf8; line-height: 1; }\n"
         ".adapt-rail-sub { font-size: 0.62rem; color: #cbd5e1; font-weight: 500;\n"
         "    margin-top: 4px; line-height: 1.25; }\n"
-        ".st-key-adapt_nav_rail div[role=\"radiogroup\"] { gap: 4px; display: flex; flex-direction: column; }\n"
-        ".st-key-adapt_nav_rail div[role=\"radiogroup\"] > label {\n"
+        # Nav radio: no radio dots, pill for selected, smooth transitions.
+        "section[data-testid=\"stSidebar\"] [role=\"radiogroup\"] { gap: 5px; }\n"
+        "section[data-testid=\"stSidebar\"] [role=\"radiogroup\"] > label {\n"
         "    display: flex; align-items: center; padding: 0.62rem 0.8rem; margin: 0; width: 100%;\n"
-        "    border-radius: 10px; cursor: pointer; color: #ffffff; font-weight: 600; font-size: 0.95rem;\n"
-        "    background: transparent;\n"
-        "    transition: background-color 0.2s ease, color 0.2s ease, transform 0.2s ease, box-shadow 0.2s ease;\n"
+        "    border-radius: 10px; cursor: pointer; background: transparent;\n"
+        "    transition: background-color 0.2s ease, transform 0.2s ease, box-shadow 0.2s ease;\n"
         "}\n"
-        ".st-key-adapt_nav_rail div[role=\"radiogroup\"] > label > div:first-child { display: none !important; }\n"
-        ".st-key-adapt_nav_rail div[role=\"radiogroup\"] > label:hover {\n"
-        "    background: rgba(148, 163, 184, 0.16); color: #ffffff; transform: translateX(-3px);\n"
+        "section[data-testid=\"stSidebar\"] [role=\"radiogroup\"] > label > div:first-child { display: none !important; }\n"
+        # FORCE plain white on the label text, whatever the inner element is.
+        "section[data-testid=\"stSidebar\"] [role=\"radiogroup\"] > label,\n"
+        "section[data-testid=\"stSidebar\"] [role=\"radiogroup\"] > label * {\n"
+        "    color: #ffffff !important; font-weight: 600; font-size: 0.95rem;\n"
         "}\n"
-        ".st-key-adapt_nav_rail div[role=\"radiogroup\"] > label:has(input:checked) {\n"
-        "    background: linear-gradient(135deg, #0ea5e9 0%, #0284c7 100%); color: #ffffff;\n"
-        "    box-shadow: 0 6px 16px rgba(14, 165, 233, 0.40); transform: translateX(-3px);\n"
+        "section[data-testid=\"stSidebar\"] [role=\"radiogroup\"] > label:hover {\n"
+        "    background: rgba(148,163,184,0.16); transform: translateX(-3px);\n"
         "}\n"
-        ".st-key-adapt_nav_rail div[role=\"radiogroup\"] > label p {\n"
-        "    font-size: 0.95rem; font-weight: 600; margin: 0; color: inherit;\n"
+        "section[data-testid=\"stSidebar\"] [role=\"radiogroup\"] > label:has(input:checked) {\n"
+        "    background: linear-gradient(135deg, #0ea5e9 0%, #0284c7 100%);\n"
+        "    box-shadow: 0 6px 16px rgba(14,165,233,0.40); transform: translateX(-3px);\n"
         "}\n"
         "</style>"
     )
-    _css = _css.replace("__PADR__", str(_RAIL_W + 28)).replace("__RAILW__", str(_RAIL_W))
     st.markdown(_css, unsafe_allow_html=True)
 
     # ========================================================================
@@ -2641,6 +2649,40 @@ def main():
         "EDU2": "Colleges/Universities",
     }
 
+    # Short, web-sourced flood-context blurbs shown on the Overview page.
+    # Sources: National Trust for Historic Preservation, NOAA, USGS, VIMS,
+    # pamunkey.org (2025); sealevelrise.org / Woods Hole (Chesapeake).
+    _LOC_BLURB = {
+        "Pamunkey": (
+            "The Pamunkey Indian Reservation sits on a low-lying ~1,600-acre peninsula on a bend "
+            "of the Pamunkey River near West Point, Virginia, ringed by river and tidal marsh on "
+            "three sides. It faces compounding flood pressure from tidal and storm flooding, "
+            "stormwater, and land subsidence, with NOAA projecting roughly 3–6 ft of sea-level "
+            "rise by 2100 — risk that led the National Trust to name it one of the 11 Most "
+            "Endangered Historic Places of 2025."
+        ),
+        "West Point": (
+            "West Point, Virginia occupies a low, flat point at the confluence of the Mattaponi "
+            "and Pamunkey rivers (which join to form the York River) in the tidal Chesapeake Bay "
+            "region — among the fastest sea-level-rise rates on the U.S. East Coast, where land "
+            "subsidence compounds tidal and storm-surge flooding."
+        ),
+    }
+    _LOC_BLURB_DEFAULT = (
+        "A low-lying coastal community increasingly exposed to rising sea level and more "
+        "frequent tidal and storm-surge flooding."
+    )
+
+    def _location_blurb(_loc):
+        if not _loc:
+            return _LOC_BLURB_DEFAULT
+        if _loc in _LOC_BLURB:
+            return _LOC_BLURB[_loc]
+        for _k, _v in _LOC_BLURB.items():
+            if _k.lower() in str(_loc).lower():
+                return _v
+        return _LOC_BLURB_DEFAULT
+
     def _frag_parse_csv(_file):
         """Read an uploaded depth-damage CSV -> (DataFrame, {col: depth_ft}, key_col)."""
         _df = pd.read_csv(_file)
@@ -2699,14 +2741,55 @@ def main():
                 rows.append((occ, stories, basement, str(r[key_col]).strip(), d, v))
         return pd.DataFrame(rows, columns=["occ", "stories", "basement", "soid", "depth", "pct"])
 
+    def _try_frag_autoload():
+        """Find the FEMA/Hazus depth-damage CSVs already sitting in the app
+        folder (or a few common subfolders) and load them automatically, so the
+        user doesn't have to upload anything. A file qualifies if it has >=3
+        m*/p* depth columns; struct vs content is decided by the filename (the
+        'Final' SOID->id mapping files have no depth columns and are skipped)."""
+        if ss.get("_frag_autoload_tried"):
+            return
+        ss["_frag_autoload_tried"] = True
+        import glob
+        seen, cands = set(), []
+        for _d in (".", "data", "Data", "FAST", "fast", "curves", "depth_damage", "fragility"):
+            for _f in glob.glob(os.path.join(_d, "*.csv")):
+                if _f not in seen:
+                    seen.add(_f)
+                    cands.append(_f)
+        struct_p = cont_p = None
+        for _p in cands:
+            try:
+                _head = pd.read_csv(_p, nrows=4)
+            except Exception:
+                continue
+            _ndepth = sum(1 for c in _head.columns
+                          if _re.fullmatch(r"[mp]\d+(?:\.\d+)?", str(c).strip().lower()))
+            if _ndepth < 3:
+                continue
+            _fl = os.path.basename(_p).lower()
+            if "cont" in _fl:
+                cont_p = cont_p or _p
+            else:
+                struct_p = struct_p or _p
+        if struct_p and cont_p:
+            try:
+                ss["_frag_S"] = _frag_long(_frag_parse_csv(struct_p))
+                ss["_frag_C"] = _frag_long(_frag_parse_csv(cont_p))
+                ss["_frag_src"] = (os.path.basename(struct_p), os.path.basename(cont_p))
+            except Exception:
+                pass
+
     def render_fragility_curves(building_row=None, ctx="frag"):
-        # 1) ensure curve data is loaded
+        # 1) ensure curve data is loaded (auto-load from the app folder first)
+        if ss.get("_frag_S") is None or ss.get("_frag_C") is None:
+            _try_frag_autoload()
         if ss.get("_frag_S") is None or ss.get("_frag_C") is None:
             st.info(
-                "Upload the FEMA/Hazus depth-damage curve files to enable fragility curves. "
-                "These are the FAST **structure** and **content** depth-damage function tables "
-                "(one % value per flood depth, with a column identifying the occupancy/structure "
-                "type, e.g. `RES1-2SNB`)."
+                "The FEMA/Hazus depth-damage curve files weren't found in the app folder. "
+                "Drop the FAST **structure** and **content** depth-damage function CSVs next "
+                "to `app.py` (or upload them here once). Each has one % value per flood depth "
+                "and a column identifying the occupancy/structure type, e.g. `RES1-2SNB`."
             )
             cA, cB = st.columns(2)
             with cA:
@@ -5411,6 +5494,16 @@ def main():
     # ========================================================================
     if active == V_OVERVIEW:
         st.markdown('<p class="tab-description">Aggregated community-wide damage statistics comparing all adaptation strategies, separated by buildings Under DFE and Above DFE.</p>', unsafe_allow_html=True)
+
+        st.markdown(
+            '<div style="background:#eff6ff; border-left:4px solid #0ea5e9; '
+            'border-radius:6px; padding:0.7rem 0.95rem; margin:0.1rem 0 0.9rem 0; '
+            'color:#0f172a; font-size:0.92rem; line-height:1.45;">'
+            f'<span style="font-weight:700;">📍 {location_name}</span> &nbsp;·&nbsp; '
+            f'{_location_blurb(selected_location)}'
+            '</div>',
+            unsafe_allow_html=True,
+        )
         
         if df_agg is not None:
             st.subheader(f"Community-Wide Damage Summary — {location_name} ({occupancy_label}) — {target_year}, {scenario}")
