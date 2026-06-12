@@ -2284,236 +2284,263 @@ def main():
     data_store, available_locations = load_data_from_folder(".")
     
     # ========================================================================
-    # SIDEBAR
+    # NAVIGATION  +  GLOBAL FILTER STATE  +  DATA PIPELINE
+    # ------------------------------------------------------------------------
+    # The UI is organized as a fixed vertical navigation rail on the RIGHT.
+    # "Settings" is the first view and holds every global control that used to
+    # live in the left sidebar; the remaining views are the analysis tabs.
+    #
+    # Streamlit purges a widget's session_state entry on any run where the
+    # widget isn't rendered. Because only the *active* view is drawn, the
+    # Settings controls are rendered on EVERY run inside a keyed container and
+    # merely hidden with CSS when another view is active -- that keeps their
+    # w_* keys alive so every view sees the current selections. The pipeline
+    # below reads those w_* values directly (Streamlit makes a freshly changed
+    # widget value available in session_state at the very start of the rerun,
+    # before the widget is re-instantiated), so the active view always renders
+    # against the current filters.
     # ========================================================================
-    with st.sidebar:
-        # --- ADAPT branding at the top of the sidebar ---
+    ss = st.session_state
+
+    # View identifiers. Defined as constants so the emoji labels live in one
+    # place; the old `with tabX:` headers were rewritten to `if active == V_*`.
+    V_SETTINGS = "\u2699\ufe0f Settings"
+    V_MAP = "\U0001f5fa\ufe0f Map"
+    V_OVERVIEW = "\U0001f4ca Overview"
+    V_DIST = "\U0001f4e6 Distributions"
+    V_RES = "\U0001f3e0 RES"
+    V_NONRES = "\U0001f3e2 Non-RES"
+    V_FLOOD = "\U0001f30a Flood maps"
+    V_ROADS = "\U0001f6e3\ufe0f Flooded roads"
+    VIEWS = [V_SETTINGS, V_MAP, V_OVERVIEW, V_DIST, V_RES, V_NONRES, V_FLOOD, V_ROADS]
+
+    def _keyed_container(_key):
+        # st.container(key=...) lands the element with a `.st-key-<key>` CSS
+        # hook (Streamlit >= 1.39). Degrade gracefully on older builds: the app
+        # still runs, it just loses the fixed-rail / hide-when-inactive styling.
+        try:
+            return st.container(key=_key)
+        except TypeError:
+            return st.container()
+
+    # ---- Right-hand vertical navigation rail -------------------------------
+    with _keyed_container("adapt_nav_rail"):
         if os.path.exists("logo.png"):
             st.image("logo.png", use_container_width=True)
         else:
             st.markdown(
-                '<div style="text-align:center; padding: 0.25rem 0 0.5rem 0;">'
-                '<span style="font-size: 1.9rem; font-weight: 800; color:#0ea5e9; letter-spacing: 0.5px;">ADAPT</span>'
-                '<div style="font-size: 0.75rem; color:#475569; font-weight:500; margin-top:-2px;">'
-                'Assessment of Damage and Adaptation Planning Tool</div>'
+                '<div class="adapt-rail-brand">'
+                '<span class="adapt-rail-word">ADAPT</span>'
+                '<span class="adapt-rail-sub">Assessment of Damage &amp; '
+                'Adaptation Planning Tool</span>'
                 '</div>',
                 unsafe_allow_html=True,
             )
-        st.markdown("<hr style='margin: 0.5rem 0 0.75rem 0; border: none; border-top: 1px solid #e2e8f0;'/>",
-                    unsafe_allow_html=True)
-        
-        st.success(f"✅ Data loaded: {len(available_locations)} location(s)")
-        
-        st.header("🎛️ Data Selection")
-        
-        if len(available_locations) > 0:
-            # Default to Pamunkey when it's in the bundle; otherwise the
-            # first available location (preserves prior behavior for any
-            # data folder that doesn't ship Pamunkey).
-            _default_loc_idx = 0
-            for _i, _loc in enumerate(available_locations):
-                if _loc == "Pamunkey":
-                    _default_loc_idx = _i
-                    break
-            selected_location = st.selectbox(
-                "📍 Location",
-                options=available_locations,
-                index=_default_loc_idx
-            )
-        else:
-            selected_location = None
-        
-        selected_occupancy = st.selectbox(
-            "🏠 Occupancy Type",
-            options=["All", "Residential", "Non-Residential"],
-            index=0,
-            format_func=lambda x: f"🏘️🏢 All Buildings" if x == "All" else f"🏘️ Residential" if x == "Residential" else f"🏢 Non-Residential"
+        active = st.radio(
+            "Navigation",
+            options=VIEWS,
+            key="adapt_active_view",
+            label_visibility="collapsed",
         )
-        
-        df_agg_raw = None
-        df_buildings_raw = None
-        loc_entry = None
 
-        if selected_location and selected_location in data_store:
-            loc_entry = data_store[selected_location]
-            df_agg_raw = loc_entry.get('agg')
-            df_buildings_raw = loc_entry.get('buildings')
+    # ---- No-data guard (precedes the pipeline, which indexes
+    #      available_locations[0]) -------------------------------------------
+    if len(available_locations) == 0:
+        st.markdown(
+            "<h1 style='text-align:center; color:#0f172a; font-weight:800; "
+            "font-size:1.9rem; line-height:1.2; margin: 0.25rem 0 1.25rem 0;'>"
+            "Building-level flood damage assessment under climate change scenarios"
+            "</h1>",
+            unsafe_allow_html=True,
+        )
+        st.error("\u26a0\ufe0f No data files found. Please ensure `.xlsx` result files (e.g., `Shinnecock_Results_ALL.xlsx`) are in the same directory as `app.py`.")
+        st.stop()
 
-        df_buildings = filter_by_occupancy(df_buildings_raw, selected_occupancy)
-        
-        # Drop the 2025 ("baseline") year from every downstream dataframe.
-        # The bundle ships it as a 'Potential' label so users can see today's
-        # damage in tables, but for this tool the relevant story is the
-        # SLR-driven escalation across 2040 / 2055 / 2100 — surfacing 2025
-        # adds a column/row that doesn't belong in any of the comparative
-        # views and creates noise (e.g. damage trajectories anchored at the
-        # baseline). Drop it ONCE here so every tab inherits the cleaner
-        # year set automatically.
-        BASELINE_YEAR_TO_DROP = 2025
-        if df_buildings is not None and 'TargetYear' in df_buildings.columns:
-            df_buildings = df_buildings[df_buildings['TargetYear'] != BASELINE_YEAR_TO_DROP].copy()
-        if df_agg_raw is not None and 'TargetYear' in df_agg_raw.columns:
-            df_agg_raw = df_agg_raw[df_agg_raw['TargetYear'] != BASELINE_YEAR_TO_DROP].copy()
-
-        # When a new-format workbook is loaded we have a pre-computed,
-        # MC-correct aggregate per occupancy bucket — pick the one that
-        # matches the sidebar selection rather than resumming per-building
-        # percentiles (which would be statistically wrong).
-        preloaded_agg = None
-        if loc_entry is not None and loc_entry.get('agg_by_occ'):
-            preloaded_agg = loc_entry['agg_by_occ'].get(selected_occupancy)
-            # Same baseline-year drop as above so the agg-driven Summary /
-            # Trends / DFE-comparison panels don't include 2025 either.
-            if preloaded_agg is not None and 'TargetYear' in preloaded_agg.columns:
-                preloaded_agg = preloaded_agg[
-                    preloaded_agg['TargetYear'] != BASELINE_YEAR_TO_DROP
-                ].copy()
-        
-        st.divider()
-        st.header("🎛️ Scenario Filters")
-        
-        # Fallback horizon set used only when no data is loaded yet; the
-        # real options come from the bundle's TargetYear values just below.
-        available_years = [2040, 2055, 2060, 2100]
-        if df_buildings is not None and 'TargetYear' in df_buildings.columns:
-            available_years = sorted(df_buildings['TargetYear'].unique())
-        elif df_agg_raw is not None and 'TargetYear' in df_agg_raw.columns:
-            available_years = sorted(df_agg_raw['TargetYear'].unique())
-        
-        # Per-bundle TargetYear label map ('Potential' for the 2025 baseline,
-        # '2040'/'2055'/'2100' otherwise). Falls back to the raw int when a
-        # location doesn't ship the labels (e.g. legacy data).
-        target_year_labels = {}
-        if loc_entry is not None and isinstance(loc_entry.get('target_year_labels'), dict):
-            target_year_labels = loc_entry['target_year_labels']
-        
-        def _format_target_year(y):
-            label = target_year_labels.get(int(y), str(int(y)))
-            # Display rule: the bundle's 'Potential' label is an internal
-            # convention for the 2025 baseline; users find a plain year
-            # easier to reason about, so we show only the year here. Other
-            # custom labels (anything that isn't 'Potential' and isn't just
-            # the bare year) still get appended in parentheses.
-            if label != str(int(y)) and label != 'Potential':
-                return f"{label} ({int(y)})"
-            return str(int(y))
-        
-        # Default to the first non-baseline horizon (typically 2040) — opening
-        # the app on the 2025 baseline hides the SLR-driven escalation that's
-        # the whole point of the tool.
-        default_idx = 0
-        if len(available_years) > 1:
-            for i, y in enumerate(available_years):
-                if target_year_labels.get(int(y)) not in (None, 'Potential'):
-                    default_idx = i
-                    break
-        
-        target_year = st.selectbox(
-            "📅 Target Year",
-            options=available_years,
-            index=default_idx,
-            format_func=_format_target_year,
-        )
-        
-        available_scenarios = ['50th-percentile', '90th-percentile']
-        if df_buildings is not None and 'SLR' in df_buildings.columns:
-            available_scenarios = sorted(df_buildings['SLR'].unique())
-        elif df_agg_raw is not None and 'SLR' in df_agg_raw.columns:
-            available_scenarios = sorted(df_agg_raw['SLR'].unique())
-        
-        scenario = st.selectbox(
-            "🌊 SLR Scenario",
-            options=available_scenarios,
-            format_func=lambda x: 'Median SLR (50th-percentile)' if x == '50th-percentile' else 'High-End SLR (90th-percentile)' if x == '90th-percentile' else x
-        )
-        
-        st.divider()
-        st.header("🗺️ Map Settings")
-        
-        if df_buildings is not None and 'DFE_Status' in df_buildings.columns:
-            fp_options = df_buildings['DFE_Status'].dropna().unique().tolist()
-            dfe_filter = st.multiselect(
-                "DFE Status (BFE+2)",
-                options=fp_options,
-                default=fp_options
-            )
-        else:
-            dfe_filter = None
-        
-        show_zero_damage = st.checkbox("Show buildings with $0 damage", value=True)
-        
-        if df_buildings is not None:
-            st.divider()
-            n_loaded = df_buildings['id'].nunique()
-            st.caption(f"**Buildings loaded:** {n_loaded:,}")
-            # When the bundle ships a skipped-buildings log, surface a small
-            # transparency note so users know the inventory isn't claiming
-            # 100% coverage. `loc_entry` may be None if no location is
-            # selected yet.
-            if loc_entry is not None:
-                skipped_df = loc_entry.get('skipped')
-                if isinstance(skipped_df, pd.DataFrame) and len(skipped_df) > 0:
-                    n_skipped = len(skipped_df)
-                    plural = 's' if n_skipped != 1 else ''
-                    st.caption(
-                        f"⚠️ {n_skipped} building{plural} excluded from the analysis "
-                        f"(see *Data Notes* below the map)."
-                    )
-                bfe_ft = loc_entry.get('bfe_ft')
-                if bfe_ft is not None:
-                    st.caption(f"BFE: **{bfe_ft:g} ft NAVD88** (DFE = BFE+2)")
-        
-        # ====================================================================
-        # 🖥️ Display
-        # --------------------------------------------------------------------
-        # Layout density toggle. Browsers don't expose a programmatic zoom
-        # API for security/accessibility reasons, so an in-app "set my
-        # zoom to 90%" isn't possible. The next-best thing is a CSS
-        # `transform: scale(0.9)` applied to the main content area —
-        # visually equivalent for most users, and the toggle leaves it
-        # off by default so anyone with a small screen / large fonts
-        # isn't surprised by an unrequested rescale.
-        # ====================================================================
-        st.divider()
-        st.subheader("🖥️ Display")
-        layout_density = st.radio(
-            "Layout density",
-            options=["Default", "Compact (90%)"],
-            index=0,
-            horizontal=True,
-            key="layout_density",
-            help=(
-                "**Default** — content renders at the browser's actual size. "
-                "**Compact** — visually shrinks the main page to ~90% via "
-                "CSS scale, fitting more on screen. Equivalent to pressing "
-                "Ctrl+– once in the browser, but only affects this app and "
-                "leaves your global browser zoom alone. Note: hover hit-"
-                "targets on the map may be slightly misaligned in Compact "
-                "mode (Plotly computes them in unscaled pixel space)."
-            ),
-        )
-    
     # ========================================================================
-    # GLOBAL CSS — sidebar narrowing (always on) + optional compact density
+    # GLOBAL FILTER STATE  ->  DATA PIPELINE
+    # Produces exactly the variable names the view bodies below consume:
+    #   selected_location, selected_occupancy, loc_entry, df_buildings, df_agg,
+    #   target_year, scenario, dfe_filter, show_zero_damage, layout_density,
+    #   available_years, available_scenarios, target_year_labels,
+    #   _format_target_year, location_name, occupancy_label
     # ========================================================================
-    # The sidebar narrowing is purely a layout fix: Streamlit's default
-    # sidebar width (~336 px on desktop, ~21rem) eats into the main column
-    # more than this dashboard needs. Pinning min/max keeps the controls
-    # readable while reclaiming horizontal real estate for the maps and
-    # box plots.
-    #
-    # The compact-mode rule scales the main content area to 90% and then
-    # widens it by 1/0.9 to recover the visual width the scale would have
-    # stolen. Anchoring to `top center` keeps content where the user
-    # expects it. Applied only when the sidebar toggle is set to
-    # "Compact (90%)".
+
+    # --- Location (default Pamunkey when present, else first available) ---
+    if "w_location" not in ss:
+        ss.w_location = "Pamunkey" if "Pamunkey" in available_locations else available_locations[0]
+    if ss.w_location not in available_locations:
+        ss.w_location = available_locations[0]
+    selected_location = ss.w_location
+
+    # --- Occupancy ---
+    ss.setdefault("w_occ", "All")
+    if ss.w_occ not in ("All", "Residential", "Non-Residential"):
+        ss.w_occ = "All"
+    selected_occupancy = ss.w_occ
+
+    # --- Load + occupancy filter + baseline-year drop (unchanged logic) ---
+    df_agg_raw = None
+    df_buildings_raw = None
+    loc_entry = None
+    if selected_location and selected_location in data_store:
+        loc_entry = data_store[selected_location]
+        df_agg_raw = loc_entry.get('agg')
+        df_buildings_raw = loc_entry.get('buildings')
+
+    df_buildings = filter_by_occupancy(df_buildings_raw, selected_occupancy)
+
+    BASELINE_YEAR_TO_DROP = 2025
+    if df_buildings is not None and 'TargetYear' in df_buildings.columns:
+        df_buildings = df_buildings[df_buildings['TargetYear'] != BASELINE_YEAR_TO_DROP].copy()
+    if df_agg_raw is not None and 'TargetYear' in df_agg_raw.columns:
+        df_agg_raw = df_agg_raw[df_agg_raw['TargetYear'] != BASELINE_YEAR_TO_DROP].copy()
+
+    preloaded_agg = None
+    if loc_entry is not None and loc_entry.get('agg_by_occ'):
+        preloaded_agg = loc_entry['agg_by_occ'].get(selected_occupancy)
+        if preloaded_agg is not None and 'TargetYear' in preloaded_agg.columns:
+            preloaded_agg = preloaded_agg[
+                preloaded_agg['TargetYear'] != BASELINE_YEAR_TO_DROP
+            ].copy()
+
+    # --- Year options + label formatter (unchanged logic) ---
+    available_years = [2040, 2055, 2060, 2100]
+    if df_buildings is not None and 'TargetYear' in df_buildings.columns:
+        available_years = sorted(df_buildings['TargetYear'].unique())
+    elif df_agg_raw is not None and 'TargetYear' in df_agg_raw.columns:
+        available_years = sorted(df_agg_raw['TargetYear'].unique())
+
+    target_year_labels = {}
+    if loc_entry is not None and isinstance(loc_entry.get('target_year_labels'), dict):
+        target_year_labels = loc_entry['target_year_labels']
+
+    def _format_target_year(y):
+        label = target_year_labels.get(int(y), str(int(y)))
+        if label != str(int(y)) and label != 'Potential':
+            return f"{label} ({int(y)})"
+        return str(int(y))
+
+    # Default to the first non-baseline horizon (typically 2040).
+    _default_year = available_years[0] if len(available_years) > 0 else None
+    if len(available_years) > 1:
+        for _y in available_years:
+            if target_year_labels.get(int(_y)) not in (None, 'Potential'):
+                _default_year = _y
+                break
+    if "w_year" not in ss:
+        ss.w_year = _default_year
+    if ss.w_year not in list(available_years):
+        ss.w_year = _default_year
+    target_year = ss.w_year
+
+    # --- SLR scenario options (unchanged logic) ---
+    available_scenarios = ['50th-percentile', '90th-percentile']
+    if df_buildings is not None and 'SLR' in df_buildings.columns:
+        available_scenarios = sorted(df_buildings['SLR'].unique())
+    elif df_agg_raw is not None and 'SLR' in df_agg_raw.columns:
+        available_scenarios = sorted(df_agg_raw['SLR'].unique())
+    if "w_scn" not in ss:
+        ss.w_scn = available_scenarios[0] if available_scenarios else '50th-percentile'
+    if ss.w_scn not in list(available_scenarios):
+        ss.w_scn = available_scenarios[0] if available_scenarios else '50th-percentile'
+    scenario = ss.w_scn
+
+    # --- DFE status filter options (unchanged logic) ---
+    if df_buildings is not None and 'DFE_Status' in df_buildings.columns:
+        fp_options = df_buildings['DFE_Status'].dropna().unique().tolist()
+    else:
+        fp_options = []
+    if "w_dfe" not in ss:
+        ss.w_dfe = list(fp_options)
+    ss.w_dfe = [d for d in ss.w_dfe if d in fp_options]
+    if not ss.w_dfe and fp_options:
+        ss.w_dfe = list(fp_options)
+    dfe_filter = ss.w_dfe if fp_options else None
+
+    # --- Misc display toggles ---
+    ss.setdefault("w_showzero", True)
+    show_zero_damage = ss.w_showzero
+    ss.setdefault("w_density", "Default")
+    if ss.w_density not in ("Default", "Compact (90%)"):
+        ss.w_density = "Default"
+    layout_density = ss.w_density
+
+    location_name = selected_location if selected_location else ""
+    occupancy_label = selected_occupancy if selected_occupancy != "All" else "All Buildings"
+
+    # ========================================================================
+    # GLOBAL CSS -- right nav rail, content offset, compact density
+    # ========================================================================
+    _RAIL_W = 232  # px
     _css_blocks = [
-        # Always-on: narrower sidebar
         """
-        section[data-testid="stSidebar"] {
-            min-width: 280px !important;
-            max-width: 280px !important;
+        /* hide the (now unused) left sidebar entirely */
+        section[data-testid="stSidebar"] { display: none !important; }
+
+        /* push main content clear of the fixed right rail */
+        .block-container { padding-right: __PADR__px !important; }
+
+        /* ---- fixed vertical navigation rail (right) ---- */
+        .st-key-adapt_nav_rail {
+            position: fixed;
+            top: 0;
+            right: 0;
+            width: __RAILW__px;
+            height: 100vh;
+            padding: 3.75rem 0.85rem 1rem 0.85rem;
+            background: linear-gradient(180deg, #0f172a 0%, #1e293b 100%);
+            box-shadow: -6px 0 24px rgba(15, 23, 42, 0.18);
+            z-index: 1000;
+            overflow-y: auto;
         }
+        .adapt-rail-brand {
+            display: flex; flex-direction: column; align-items: flex-start;
+            padding: 0 0.35rem 0.9rem 0.35rem;
+            margin-bottom: 0.6rem;
+            border-bottom: 1px solid rgba(148, 163, 184, 0.18);
+        }
+        .adapt-rail-word {
+            font-size: 1.6rem; font-weight: 800; letter-spacing: 0.5px;
+            color: #38bdf8; line-height: 1;
+        }
+        .adapt-rail-sub {
+            font-size: 0.62rem; color: #94a3b8; font-weight: 500;
+            margin-top: 4px; line-height: 1.25;
+        }
+        /* radio group -> vertical nav pills */
+        .st-key-adapt_nav_rail div[role="radiogroup"] {
+            gap: 4px; display: flex; flex-direction: column;
+        }
+        .st-key-adapt_nav_rail div[role="radiogroup"] > label {
+            display: flex; align-items: center;
+            padding: 0.62rem 0.8rem; margin: 0; width: 100%;
+            border-radius: 10px; cursor: pointer;
+            color: #cbd5e1; font-weight: 600; font-size: 0.95rem;
+            background: transparent;
+            transition: background-color 0.2s ease, color 0.2s ease,
+                        transform 0.2s ease, box-shadow 0.2s ease;
+        }
+        /* hide the native radio dot */
+        .st-key-adapt_nav_rail div[role="radiogroup"] > label > div:first-child {
+            display: none !important;
+        }
+        .st-key-adapt_nav_rail div[role="radiogroup"] > label:hover {
+            background: rgba(148, 163, 184, 0.12);
+            color: #f1f5f9;
+            transform: translateX(-3px);
+        }
+        /* selected pill */
+        .st-key-adapt_nav_rail div[role="radiogroup"] > label:has(input:checked) {
+            background: linear-gradient(135deg, #0ea5e9 0%, #0284c7 100%);
+            color: #ffffff;
+            box-shadow: 0 6px 16px rgba(14, 165, 233, 0.38);
+            transform: translateX(-3px);
+        }
+        .st-key-adapt_nav_rail div[role="radiogroup"] > label p {
+            font-size: 0.95rem; font-weight: 600; margin: 0; color: inherit;
+        }
+        /* settings view width */
+        .st-key-adapt_settings_panel { max-width: 880px; }
         """
     ]
     if layout_density == "Compact (90%)":
@@ -2524,24 +2551,19 @@ def main():
             width: 111.11%;
         }
         """)
-    st.markdown(
-        "<style>\n" + "\n".join(_css_blocks) + "\n</style>",
-        unsafe_allow_html=True,
-    )
-    
+    _css = ("<style>\n" + "\n".join(_css_blocks) + "\n</style>")
+    _css = _css.replace("__PADR__", str(_RAIL_W + 28)).replace("__RAILW__", str(_RAIL_W))
+    st.markdown(_css, unsafe_allow_html=True)
+
     # ========================================================================
-    # PAGE TITLE — centered, bold, above the tabs
+    # PAGE TITLE
     # ========================================================================
-    location_name = selected_location if selected_location else ""
-    occupancy_label = selected_occupancy if selected_occupancy != "All" else "All Buildings"
-    
     if selected_location:
         page_title = f"Building-level flood damage assessment for {selected_location}"
         if selected_occupancy != "All":
-            page_title += f" — {selected_occupancy}"
+            page_title += f" \u2014 {selected_occupancy}"
     else:
         page_title = "Building-level flood damage assessment under climate change scenarios"
-    
     st.markdown(
         "<h1 style='text-align:center; color:#0f172a; font-weight:800; "
         "font-size:1.9rem; line-height:1.2; margin: 0.25rem 0 1.25rem 0;'>"
@@ -2549,28 +2571,19 @@ def main():
         "</h1>",
         unsafe_allow_html=True,
     )
-    
+
     # ========================================================================
-    # CHECK IF DATA IS LOADED
+    # NO-BUILDINGS GUARD
     # ========================================================================
-    
-    if len(available_locations) == 0:
-        st.error("⚠️ No data files found. Please ensure `.xlsx` result files (e.g., `Shinnecock_Results_ALL.xlsx`) are in the same directory as `app.py`.")
-        st.stop()
-    
     if df_buildings is None or len(df_buildings) == 0:
         st.warning(f"No {selected_occupancy.lower()} buildings found in the data for {selected_location}.")
         st.stop()
-    
+
     # ========================================================================
-    # COMPUTE AGGREGATED DATA
+    # COMPUTE AGGREGATED DATA (unchanged logic)
     # ========================================================================
-    
     df_agg = None
     if preloaded_agg is not None and not preloaded_agg.empty:
-        # New-format: use the MC-correct aggregate (community percentiles
-        # derived from the sum of MC realizations across buildings, not from
-        # summing per-building percentiles).
         df_agg = preloaded_agg.copy()
     elif df_buildings is not None:
         agg_frames = []
@@ -2581,25 +2594,73 @@ def main():
                     agg_frames.append(agg_df)
         if agg_frames:
             df_agg = pd.concat(agg_frames, ignore_index=True)
-    
+
     # ========================================================================
-    # MAIN CONTENT - TABS
+    # SETTINGS VIEW -- always rendered (keeps w_* keys alive), CSS-hidden when
+    # another view is active. These are the controls that used to be in the
+    # left sidebar; each binds to its w_* session key.
     # ========================================================================
-    
-    tab2, tab1, tab_dist, tab3, tab_depth, tab_flood, tab_roads = st.tabs([
-        "🗺️ Map",
-        "📊 Overview",
-        "📦 Distributions",
-        "🏠 RES",
-        "🏢 Non-RES",
-        "🌊 Flood maps",
-        "🛣️ Flooded roads",
-    ])
+    with _keyed_container("adapt_settings_panel"):
+        st.markdown("### \u2699\ufe0f Settings")
+        st.success(f"\u2705 Data loaded: {len(available_locations)} location(s)")
+
+        _sc1, _sc2 = st.columns(2)
+        with _sc1:
+            st.selectbox("\U0001f4cd Location", options=available_locations, key="w_location")
+            st.selectbox(
+                "\U0001f4c5 Target Year", options=available_years, key="w_year",
+                format_func=_format_target_year,
+            )
+            if fp_options:
+                st.multiselect("DFE Status (BFE+2)", options=fp_options, key="w_dfe")
+        with _sc2:
+            st.selectbox(
+                "\U0001f3e0 Occupancy Type",
+                options=["All", "Residential", "Non-Residential"], key="w_occ",
+                format_func=lambda x: "\U0001f3d8\ufe0f\U0001f3e2 All Buildings" if x == "All" else "\U0001f3d8\ufe0f Residential" if x == "Residential" else "\U0001f3e2 Non-Residential",
+            )
+            st.selectbox(
+                "\U0001f30a SLR Scenario", options=available_scenarios, key="w_scn",
+                format_func=lambda x: 'Median SLR (50th-percentile)' if x == '50th-percentile' else 'High-End SLR (90th-percentile)' if x == '90th-percentile' else x,
+            )
+            st.checkbox("Show buildings with $0 damage", key="w_showzero")
+
+        st.radio(
+            "Layout density", options=["Default", "Compact (90%)"],
+            key="w_density", horizontal=True,
+            help=(
+                "**Default** -- content renders at the browser's actual size. "
+                "**Compact** -- visually shrinks the main page to ~90% via CSS "
+                "scale, fitting more on screen."
+            ),
+        )
+
+        st.divider()
+        n_loaded = df_buildings['id'].nunique()
+        st.caption(f"**Buildings loaded:** {n_loaded:,}")
+        if loc_entry is not None:
+            skipped_df = loc_entry.get('skipped')
+            if isinstance(skipped_df, pd.DataFrame) and len(skipped_df) > 0:
+                n_skipped = len(skipped_df)
+                plural = 's' if n_skipped != 1 else ''
+                st.caption(
+                    f"\u26a0\ufe0f {n_skipped} building{plural} excluded from the analysis "
+                    f"(see *Data Notes* below the map)."
+                )
+            bfe_ft = loc_entry.get('bfe_ft')
+            if bfe_ft is not None:
+                st.caption(f"BFE: **{bfe_ft:g} ft NAVD88** (DFE = BFE+2)")
+
+    if active != V_SETTINGS:
+        st.markdown(
+            "<style>.st-key-adapt_settings_panel{display:none !important;}</style>",
+            unsafe_allow_html=True,
+        )
 
     # ========================================================================
     # TAB: FLOOD MAPS — bathtub inundation for user-specified water levels
     # ========================================================================
-    with tab_flood:
+    if active == V_FLOOD:
         st.markdown(
             '<p class="tab-description">Bathtub flood-inundation maps for water levels you specify. '
             'Enter present-day flood levels (ft NAVD88); the app adds projected sea-level rise for each '
@@ -2849,7 +2910,7 @@ def main():
     # ========================================================================
     # TAB: FLOODED ROADS — OSM road network classified by inundation
     # ========================================================================
-    with tab_roads:
+    if active == V_ROADS:
         st.markdown(
             '<p class="tab-description">OpenStreetMap roads classified against the same bathtub flood levels '
             'as the Flood Maps tab. Each road is sampled along its length, its ground elevation read from the '
@@ -3088,7 +3149,7 @@ def main():
     # ========================================================================
     # TAB: BUILDING DEPTH — flood depth at one building vs ground / FFE / NAVD88
     # ========================================================================
-    with tab_depth:
+    if active == V_NONRES:
         st.markdown(
             '<p class="tab-description">Flood depth at a single building. Pick a structure, enter the same '
             'flood levels used in the map tabs, and the app reports the projected water level by year (with '
@@ -3269,7 +3330,7 @@ def main():
     # ========================================================================
     # TAB: PER-BUILDING ANALYSIS — cross-building distributions + Plots 3/4/5
     # ========================================================================
-    with tab_dist:
+    if active == V_DIST:
         st.markdown(
             '<p class="tab-description">Distribution of cumulative damage <b>across individual buildings</b> '
             'and counts of buildings by adaptation effectiveness. <b>Both SLR scenarios</b> are shown '
@@ -3777,7 +3838,7 @@ def main():
     # ========================================================================
     # TAB 2: BUILDING MAP
     # ========================================================================
-    with tab2:
+    if active == V_MAP:
         st.markdown(
             '<p class="tab-description">Interactive map showing building-level flood risk. '
             'Use the <b>Map View</b> selector to switch between damage intensity, adaptation '
@@ -5174,7 +5235,7 @@ def main():
     # ========================================================================
     # TAB 1: COMMUNITY SUMMARY
     # ========================================================================
-    with tab1:
+    if active == V_OVERVIEW:
         st.markdown('<p class="tab-description">Aggregated community-wide damage statistics comparing all adaptation strategies, separated by buildings Under DFE and Above DFE.</p>', unsafe_allow_html=True)
         
         if df_agg is not None:
@@ -5656,7 +5717,7 @@ def main():
     # ========================================================================
     # TAB 3: BUILDING DETAILS
     # ========================================================================
-    with tab3:
+    if active == V_RES:
         st.markdown('<p class="tab-description">Select an individual building to view detailed damage projections across time horizons and compare adaptation options.</p>', unsafe_allow_html=True)
         
         if df_buildings is not None:
@@ -6547,7 +6608,7 @@ def main():
     # ========================================================================
     # TAB 4: SCENARIO COMPARISON
     # ========================================================================
-    with tab1:
+    if active == V_OVERVIEW:
         st.divider()
         st.subheader("📈 Trends — scenario comparison across horizons")
         st.markdown('<p class="tab-description">Compare cumulative damage projections between Median (50th-percentile) and High-End (90th-percentile) sea level rise scenarios across all time horizons.</p>', unsafe_allow_html=True)
