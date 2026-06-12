@@ -2485,13 +2485,12 @@ def main():
     # ========================================================================
     _css = (
         "<style>\n"
-        # Make the app a flex row and push the sidebar to the right edge.
+        # Nav lives in the sidebar (left by default).
         "[data-testid=\"stAppViewContainer\"] { display: flex; }\n"
-        "section[data-testid=\"stSidebar\"] { order: 99; }\n"
         # Dark ADAPT rail styling on the sidebar.
         "section[data-testid=\"stSidebar\"] {\n"
         "    background: linear-gradient(180deg, #0f172a 0%, #1e293b 100%) !important;\n"
-        "    border-left: 1px solid rgba(148,163,184,0.18);\n"
+        "    border-right: 1px solid rgba(148,163,184,0.18);\n"
         "    min-width: 248px !important; max-width: 320px !important;\n"
         "}\n"
         "section[data-testid=\"stSidebar\"] > div,\n"
@@ -2523,11 +2522,11 @@ def main():
         "    color: #ffffff !important; font-weight: 600; font-size: 0.95rem;\n"
         "}\n"
         "section[data-testid=\"stSidebar\"] [role=\"radiogroup\"] > label:hover {\n"
-        "    background: rgba(148,163,184,0.16); transform: translateX(-3px);\n"
+        "    background: rgba(148,163,184,0.16); transform: translateX(3px);\n"
         "}\n"
         "section[data-testid=\"stSidebar\"] [role=\"radiogroup\"] > label:has(input:checked) {\n"
         "    background: linear-gradient(135deg, #0ea5e9 0%, #0284c7 100%);\n"
-        "    box-shadow: 0 6px 16px rgba(14,165,233,0.40); transform: translateX(-3px);\n"
+        "    box-shadow: 0 6px 16px rgba(14,165,233,0.40); transform: translateX(3px);\n"
         "}\n"
         "</style>"
     )
