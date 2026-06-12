@@ -2284,46 +2284,64 @@ def main():
     data_store, available_locations = load_data_from_folder(".")
     
     # ========================================================================
-    # NAVIGATION  +  GLOBAL FILTER STATE  +  DATA PIPELINE
+    # NAVIGATION RAIL  +  GLOBAL FILTER STATE  +  PER-PAGE INLINE SETTINGS
     # ------------------------------------------------------------------------
-    # The UI is organized as a fixed vertical navigation rail on the RIGHT.
-    # "Settings" is the first view and holds every global control that used to
-    # live in the left sidebar; the remaining views are the analysis tabs.
-    #
-    # Streamlit purges a widget's session_state entry on any run where the
-    # widget isn't rendered. Because only the *active* view is drawn, the
-    # Settings controls are rendered on EVERY run inside a keyed container and
-    # merely hidden with CSS when another view is active -- that keeps their
-    # w_* keys alive so every view sees the current selections. The pipeline
-    # below reads those w_* values directly (Streamlit makes a freshly changed
-    # widget value available in session_state at the very start of the rerun,
-    # before the widget is re-instantiated), so the active view always renders
-    # against the current filters.
+    # Right-hand vertical nav. There is no separate Settings page: each
+    # analysis page renders only the global controls it needs as a compact
+    # one-line row beneath the page title. Committed values live in cv_*
+    # session keys (never widget keys, so never purged when a control isn't
+    # shown on the current page). Inline widgets use w_* keys plus an
+    # on_change callback that copies w_* -> cv_* at the start of the rerun,
+    # so the pipeline below (which reads cv_*) always reflects the latest
+    # selection with no one-rerun lag.
     # ========================================================================
+    import re as _re
+    import streamlit.components.v1 as _components
+
     ss = st.session_state
 
-    # View identifiers. Defined as constants so the emoji labels live in one
-    # place; the old `with tabX:` headers were rewritten to `if active == V_*`.
-    V_SETTINGS = "\u2699\ufe0f Settings"
-    V_MAP = "\U0001f5fa\ufe0f Map"
+    # ---- Stop Streamlit's clear-cache shortcut from firing on Ctrl/Cmd+C.
+    # The component iframe is same-origin (srcdoc), so it can add a
+    # capture-phase keydown listener on the parent document that swallows the
+    # shortcut for a copy gesture WITHOUT calling preventDefault (native copy
+    # still works). Installed once via a window flag. ----
+    _components.html(
+        """
+        <script>
+        (function(){
+          try {
+            var d = window.parent.document;
+            if (d.__adapt_copyfix) return;
+            d.__adapt_copyfix = true;
+            d.addEventListener('keydown', function(e){
+              var k = (e.key || '').toLowerCase();
+              if (k === 'c' && (e.ctrlKey || e.metaKey)) { e.stopImmediatePropagation(); }
+            }, true);
+          } catch (err) {}
+        })();
+        </script>
+        """,
+        height=0,
+    )
+
+    # View identifiers (constants so labels live in one place).
+    V_FLOOD = "\U0001f30a Flood maps"
+    V_MAP = "\U0001f5fa\ufe0f Damage maps"
+    V_ROADS = "\U0001f6e3\ufe0f Road maps"
     V_OVERVIEW = "\U0001f4ca Overview"
     V_DIST = "\U0001f4e6 Distributions"
-    V_RES = "\U0001f3e0 RES"
-    V_NONRES = "\U0001f3e2 Non-RES"
-    V_FLOOD = "\U0001f30a Flood maps"
-    V_ROADS = "\U0001f6e3\ufe0f Flooded roads"
-    VIEWS = [V_SETTINGS, V_MAP, V_OVERVIEW, V_DIST, V_RES, V_NONRES, V_FLOOD, V_ROADS]
+    V_RES = "\U0001f3e0 Residential example"
+    V_NONRES = "\U0001f3e2 Non-residential example"
+    V_FRAG = "\U0001f4c8 Fragility curves"
+    VIEWS = [V_FLOOD, V_MAP, V_ROADS, V_OVERVIEW, V_DIST, V_RES, V_NONRES, V_FRAG]
 
     def _keyed_container(_key):
-        # st.container(key=...) lands the element with a `.st-key-<key>` CSS
-        # hook (Streamlit >= 1.39). Degrade gracefully on older builds: the app
-        # still runs, it just loses the fixed-rail / hide-when-inactive styling.
         try:
             return st.container(key=_key)
         except TypeError:
             return st.container()
 
-    # ---- Right-hand vertical navigation rail -------------------------------
+    # ---- Right-hand vertical navigation rail ----
     with _keyed_container("adapt_nav_rail"):
         if os.path.exists("logo.png"):
             st.image("logo.png", use_container_width=True)
@@ -2337,14 +2355,12 @@ def main():
                 unsafe_allow_html=True,
             )
         active = st.radio(
-            "Navigation",
-            options=VIEWS,
-            key="adapt_active_view",
+            "Navigation", options=VIEWS, key="adapt_active_view",
             label_visibility="collapsed",
         )
 
     # ---- No-data guard (precedes the pipeline, which indexes
-    #      available_locations[0]) -------------------------------------------
+    #      available_locations[0]) ----
     if len(available_locations) == 0:
         st.markdown(
             "<h1 style='text-align:center; color:#0f172a; font-weight:800; "
@@ -2357,26 +2373,26 @@ def main():
         st.stop()
 
     # ========================================================================
-    # GLOBAL FILTER STATE  ->  DATA PIPELINE
-    # Produces exactly the variable names the view bodies below consume:
-    #   selected_location, selected_occupancy, loc_entry, df_buildings, df_agg,
-    #   target_year, scenario, dfe_filter, show_zero_damage, layout_density,
-    #   available_years, available_scenarios, target_year_labels,
-    #   _format_target_year, location_name, occupancy_label
+    # COMMITTED FILTER STATE (cv_*) + on_change callbacks
     # ========================================================================
+    def _cb_loc():  ss.cv_location = ss.w_location
+    def _cb_occ():  ss.cv_occ = ss.w_occ
+    def _cb_year(): ss.cv_year = ss.w_year
+    def _cb_scn():  ss.cv_scn = ss.w_scn
+    def _cb_dfe():  ss.cv_dfe = ss.w_dfe
+    def _cb_zero(): ss.cv_showzero = ss.w_showzero
 
     # --- Location (default Pamunkey when present, else first available) ---
-    if "w_location" not in ss:
-        ss.w_location = "Pamunkey" if "Pamunkey" in available_locations else available_locations[0]
-    if ss.w_location not in available_locations:
-        ss.w_location = available_locations[0]
-    selected_location = ss.w_location
+    if "cv_location" not in ss:
+        ss.cv_location = "Pamunkey" if "Pamunkey" in available_locations else available_locations[0]
+    if ss.cv_location not in available_locations:
+        ss.cv_location = available_locations[0]
+    selected_location = ss.cv_location
 
-    # --- Occupancy ---
-    ss.setdefault("w_occ", "All")
-    if ss.w_occ not in ("All", "Residential", "Non-Residential"):
-        ss.w_occ = "All"
-    selected_occupancy = ss.w_occ
+    ss.setdefault("cv_occ", "All")
+    if ss.cv_occ not in ("All", "Residential", "Non-Residential"):
+        ss.cv_occ = "All"
+    selected_occupancy = ss.cv_occ
 
     # --- Load + occupancy filter + baseline-year drop (unchanged logic) ---
     df_agg_raw = None
@@ -2420,18 +2436,17 @@ def main():
             return f"{label} ({int(y)})"
         return str(int(y))
 
-    # Default to the first non-baseline horizon (typically 2040).
     _default_year = available_years[0] if len(available_years) > 0 else None
     if len(available_years) > 1:
         for _y in available_years:
             if target_year_labels.get(int(_y)) not in (None, 'Potential'):
                 _default_year = _y
                 break
-    if "w_year" not in ss:
-        ss.w_year = _default_year
-    if ss.w_year not in list(available_years):
-        ss.w_year = _default_year
-    target_year = ss.w_year
+    if "cv_year" not in ss:
+        ss.cv_year = _default_year
+    if ss.cv_year not in list(available_years):
+        ss.cv_year = _default_year
+    target_year = ss.cv_year
 
     # --- SLR scenario options (unchanged logic) ---
     available_scenarios = ['50th-percentile', '90th-percentile']
@@ -2439,119 +2454,74 @@ def main():
         available_scenarios = sorted(df_buildings['SLR'].unique())
     elif df_agg_raw is not None and 'SLR' in df_agg_raw.columns:
         available_scenarios = sorted(df_agg_raw['SLR'].unique())
-    if "w_scn" not in ss:
-        ss.w_scn = available_scenarios[0] if available_scenarios else '50th-percentile'
-    if ss.w_scn not in list(available_scenarios):
-        ss.w_scn = available_scenarios[0] if available_scenarios else '50th-percentile'
-    scenario = ss.w_scn
+    if "cv_scn" not in ss:
+        ss.cv_scn = available_scenarios[0] if available_scenarios else '50th-percentile'
+    if ss.cv_scn not in list(available_scenarios):
+        ss.cv_scn = available_scenarios[0] if available_scenarios else '50th-percentile'
+    scenario = ss.cv_scn
 
     # --- DFE status filter options (unchanged logic) ---
     if df_buildings is not None and 'DFE_Status' in df_buildings.columns:
         fp_options = df_buildings['DFE_Status'].dropna().unique().tolist()
     else:
         fp_options = []
-    if "w_dfe" not in ss:
-        ss.w_dfe = list(fp_options)
-    ss.w_dfe = [d for d in ss.w_dfe if d in fp_options]
-    if not ss.w_dfe and fp_options:
-        ss.w_dfe = list(fp_options)
-    dfe_filter = ss.w_dfe if fp_options else None
+    if "cv_dfe" not in ss:
+        ss.cv_dfe = list(fp_options)
+    ss.cv_dfe = [d for d in ss.cv_dfe if d in fp_options]
+    if not ss.cv_dfe and fp_options:
+        ss.cv_dfe = list(fp_options)
+    dfe_filter = ss.cv_dfe if fp_options else None
 
-    # --- Misc display toggles ---
-    ss.setdefault("w_showzero", True)
-    show_zero_damage = ss.w_showzero
-    ss.setdefault("w_density", "Default")
-    if ss.w_density not in ("Default", "Compact (90%)"):
-        ss.w_density = "Default"
-    layout_density = ss.w_density
+    ss.setdefault("cv_showzero", True)
+    show_zero_damage = ss.cv_showzero
 
     location_name = selected_location if selected_location else ""
     occupancy_label = selected_occupancy if selected_occupancy != "All" else "All Buildings"
 
     # ========================================================================
-    # GLOBAL CSS -- right nav rail, content offset, compact density
+    # GLOBAL CSS -- right nav rail (white labels), content offset
     # ========================================================================
     _RAIL_W = 232  # px
-    _css_blocks = [
-        """
-        /* hide the (now unused) left sidebar entirely */
-        section[data-testid="stSidebar"] { display: none !important; }
-
-        /* push main content clear of the fixed right rail */
-        .block-container { padding-right: __PADR__px !important; }
-
-        /* ---- fixed vertical navigation rail (right) ---- */
-        .st-key-adapt_nav_rail {
-            position: fixed;
-            top: 0;
-            right: 0;
-            width: __RAILW__px;
-            height: 100vh;
-            padding: 3.75rem 0.85rem 1rem 0.85rem;
-            background: linear-gradient(180deg, #0f172a 0%, #1e293b 100%);
-            box-shadow: -6px 0 24px rgba(15, 23, 42, 0.18);
-            z-index: 1000;
-            overflow-y: auto;
-        }
-        .adapt-rail-brand {
-            display: flex; flex-direction: column; align-items: flex-start;
-            padding: 0 0.35rem 0.9rem 0.35rem;
-            margin-bottom: 0.6rem;
-            border-bottom: 1px solid rgba(148, 163, 184, 0.18);
-        }
-        .adapt-rail-word {
-            font-size: 1.6rem; font-weight: 800; letter-spacing: 0.5px;
-            color: #38bdf8; line-height: 1;
-        }
-        .adapt-rail-sub {
-            font-size: 0.62rem; color: #94a3b8; font-weight: 500;
-            margin-top: 4px; line-height: 1.25;
-        }
-        /* radio group -> vertical nav pills */
-        .st-key-adapt_nav_rail div[role="radiogroup"] {
-            gap: 4px; display: flex; flex-direction: column;
-        }
-        .st-key-adapt_nav_rail div[role="radiogroup"] > label {
-            display: flex; align-items: center;
-            padding: 0.62rem 0.8rem; margin: 0; width: 100%;
-            border-radius: 10px; cursor: pointer;
-            color: #cbd5e1; font-weight: 600; font-size: 0.95rem;
-            background: transparent;
-            transition: background-color 0.2s ease, color 0.2s ease,
-                        transform 0.2s ease, box-shadow 0.2s ease;
-        }
-        /* hide the native radio dot */
-        .st-key-adapt_nav_rail div[role="radiogroup"] > label > div:first-child {
-            display: none !important;
-        }
-        .st-key-adapt_nav_rail div[role="radiogroup"] > label:hover {
-            background: rgba(148, 163, 184, 0.12);
-            color: #f1f5f9;
-            transform: translateX(-3px);
-        }
-        /* selected pill */
-        .st-key-adapt_nav_rail div[role="radiogroup"] > label:has(input:checked) {
-            background: linear-gradient(135deg, #0ea5e9 0%, #0284c7 100%);
-            color: #ffffff;
-            box-shadow: 0 6px 16px rgba(14, 165, 233, 0.38);
-            transform: translateX(-3px);
-        }
-        .st-key-adapt_nav_rail div[role="radiogroup"] > label p {
-            font-size: 0.95rem; font-weight: 600; margin: 0; color: inherit;
-        }
-        /* settings view width */
-        .st-key-adapt_settings_panel { max-width: 880px; }
-        """
-    ]
-    if layout_density == "Compact (90%)":
-        _css_blocks.append("""
-        .main .block-container {
-            transform: scale(0.9);
-            transform-origin: top center;
-            width: 111.11%;
-        }
-        """)
-    _css = ("<style>\n" + "\n".join(_css_blocks) + "\n</style>")
+    _css = (
+        "<style>\n"
+        "section[data-testid=\"stSidebar\"] { display: none !important; }\n"
+        ".block-container { padding-right: __PADR__px !important; }\n"
+        ".st-key-adapt_nav_rail {\n"
+        "    position: fixed; top: 0; right: 0; width: __RAILW__px; height: 100vh;\n"
+        "    padding: 3.75rem 0.85rem 1rem 0.85rem;\n"
+        "    background: linear-gradient(180deg, #0f172a 0%, #1e293b 100%);\n"
+        "    box-shadow: -6px 0 24px rgba(15, 23, 42, 0.18);\n"
+        "    z-index: 1000; overflow-y: auto;\n"
+        "}\n"
+        ".adapt-rail-brand {\n"
+        "    display: flex; flex-direction: column; align-items: flex-start;\n"
+        "    padding: 0 0.35rem 0.9rem 0.35rem; margin-bottom: 0.6rem;\n"
+        "    border-bottom: 1px solid rgba(148, 163, 184, 0.22);\n"
+        "}\n"
+        ".adapt-rail-word { font-size: 1.6rem; font-weight: 800; letter-spacing: 0.5px;\n"
+        "    color: #38bdf8; line-height: 1; }\n"
+        ".adapt-rail-sub { font-size: 0.62rem; color: #cbd5e1; font-weight: 500;\n"
+        "    margin-top: 4px; line-height: 1.25; }\n"
+        ".st-key-adapt_nav_rail div[role=\"radiogroup\"] { gap: 4px; display: flex; flex-direction: column; }\n"
+        ".st-key-adapt_nav_rail div[role=\"radiogroup\"] > label {\n"
+        "    display: flex; align-items: center; padding: 0.62rem 0.8rem; margin: 0; width: 100%;\n"
+        "    border-radius: 10px; cursor: pointer; color: #ffffff; font-weight: 600; font-size: 0.95rem;\n"
+        "    background: transparent;\n"
+        "    transition: background-color 0.2s ease, color 0.2s ease, transform 0.2s ease, box-shadow 0.2s ease;\n"
+        "}\n"
+        ".st-key-adapt_nav_rail div[role=\"radiogroup\"] > label > div:first-child { display: none !important; }\n"
+        ".st-key-adapt_nav_rail div[role=\"radiogroup\"] > label:hover {\n"
+        "    background: rgba(148, 163, 184, 0.16); color: #ffffff; transform: translateX(-3px);\n"
+        "}\n"
+        ".st-key-adapt_nav_rail div[role=\"radiogroup\"] > label:has(input:checked) {\n"
+        "    background: linear-gradient(135deg, #0ea5e9 0%, #0284c7 100%); color: #ffffff;\n"
+        "    box-shadow: 0 6px 16px rgba(14, 165, 233, 0.40); transform: translateX(-3px);\n"
+        "}\n"
+        ".st-key-adapt_nav_rail div[role=\"radiogroup\"] > label p {\n"
+        "    font-size: 0.95rem; font-weight: 600; margin: 0; color: inherit;\n"
+        "}\n"
+        "</style>"
+    )
     _css = _css.replace("__PADR__", str(_RAIL_W + 28)).replace("__RAILW__", str(_RAIL_W))
     st.markdown(_css, unsafe_allow_html=True)
 
@@ -2566,7 +2536,7 @@ def main():
         page_title = "Building-level flood damage assessment under climate change scenarios"
     st.markdown(
         "<h1 style='text-align:center; color:#0f172a; font-weight:800; "
-        "font-size:1.9rem; line-height:1.2; margin: 0.25rem 0 1.25rem 0;'>"
+        "font-size:1.9rem; line-height:1.2; margin: 0.25rem 0 1.0rem 0;'>"
         f"{page_title}"
         "</h1>",
         unsafe_allow_html=True,
@@ -2596,66 +2566,238 @@ def main():
             df_agg = pd.concat(agg_frames, ignore_index=True)
 
     # ========================================================================
-    # SETTINGS VIEW -- always rendered (keeps w_* keys alive), CSS-hidden when
-    # another view is active. These are the controls that used to be in the
-    # left sidebar; each binds to its w_* session key.
+    # PER-PAGE INLINE SETTINGS (compact one-line row beneath the title)
     # ========================================================================
-    with _keyed_container("adapt_settings_panel"):
-        st.markdown("### \u2699\ufe0f Settings")
-        st.success(f"\u2705 Data loaded: {len(available_locations)} location(s)")
+    def _occ_fmt(x):
+        return ("\U0001f3d8\ufe0f\U0001f3e2 All Buildings" if x == "All"
+                else "\U0001f3d8\ufe0f Residential" if x == "Residential"
+                else "\U0001f3e2 Non-Residential")
 
-        _sc1, _sc2 = st.columns(2)
-        with _sc1:
-            st.selectbox("\U0001f4cd Location", options=available_locations, key="w_location")
-            st.selectbox(
-                "\U0001f4c5 Target Year", options=available_years, key="w_year",
-                format_func=_format_target_year,
-            )
-            if fp_options:
-                st.multiselect("DFE Status (BFE+2)", options=fp_options, key="w_dfe")
-        with _sc2:
-            st.selectbox(
-                "\U0001f3e0 Occupancy Type",
-                options=["All", "Residential", "Non-Residential"], key="w_occ",
-                format_func=lambda x: "\U0001f3d8\ufe0f\U0001f3e2 All Buildings" if x == "All" else "\U0001f3d8\ufe0f Residential" if x == "Residential" else "\U0001f3e2 Non-Residential",
-            )
-            st.selectbox(
-                "\U0001f30a SLR Scenario", options=available_scenarios, key="w_scn",
-                format_func=lambda x: 'Median SLR (50th-percentile)' if x == '50th-percentile' else 'High-End SLR (90th-percentile)' if x == '90th-percentile' else x,
-            )
-            st.checkbox("Show buildings with $0 damage", key="w_showzero")
+    def _scn_fmt(x):
+        return ('Median SLR (50th pct)' if x == '50th-percentile'
+                else 'High-End SLR (90th pct)' if x == '90th-percentile' else x)
 
-        st.radio(
-            "Layout density", options=["Default", "Compact (90%)"],
-            key="w_density", horizontal=True,
-            help=(
-                "**Default** -- content renders at the browser's actual size. "
-                "**Compact** -- visually shrinks the main page to ~90% via CSS "
-                "scale, fitting more on screen."
-            ),
+    def render_inline_settings(items):
+        items = [i for i in items if (i != "dfe" or fp_options)]
+        if not items:
+            return
+        cols = st.columns(len(items))
+        for _col, name in zip(cols, items):
+            with _col:
+                if name == "location":
+                    ss.w_location = ss.cv_location
+                    st.selectbox("\U0001f4cd Location", available_locations,
+                                 key="w_location", on_change=_cb_loc)
+                elif name == "occ":
+                    ss.w_occ = ss.cv_occ
+                    st.selectbox("\U0001f3e0 Occupancy", ["All", "Residential", "Non-Residential"],
+                                 key="w_occ", on_change=_cb_occ, format_func=_occ_fmt)
+                elif name == "year":
+                    ss.w_year = ss.cv_year
+                    st.selectbox("\U0001f4c5 Target Year", available_years,
+                                 key="w_year", on_change=_cb_year, format_func=_format_target_year)
+                elif name == "scn":
+                    ss.w_scn = ss.cv_scn
+                    st.selectbox("\U0001f30a SLR Scenario", available_scenarios,
+                                 key="w_scn", on_change=_cb_scn, format_func=_scn_fmt)
+                elif name == "dfe":
+                    ss.w_dfe = ss.cv_dfe
+                    st.multiselect("DFE status", fp_options, key="w_dfe", on_change=_cb_dfe)
+                elif name == "showzero":
+                    ss.w_showzero = ss.cv_showzero
+                    st.checkbox("Show $0 buildings", key="w_showzero", on_change=_cb_zero)
+
+    _PAGE_SETTINGS = {
+        V_MAP:      ["location", "occ", "year", "scn"],
+        V_OVERVIEW: ["location", "occ", "year", "scn"],
+        V_DIST:     ["location", "occ", "year", "scn"],
+        V_RES:      ["location", "year", "scn"],
+        V_NONRES:   ["location"],
+        # V_FLOOD, V_ROADS, V_FRAG -> no global settings row
+    }
+    if active in _PAGE_SETTINGS:
+        render_inline_settings(_PAGE_SETTINGS[active])
+
+    # ========================================================================
+    # FRAGILITY CURVES (FEMA / Hazus depth-damage functions)
+    # Shared renderer: used by the "Fragility curves" view and embedded, per
+    # selected building, in the Residential / Non-residential example tabs.
+    # Curve CSVs are uploaded in-app (FAST structure- and content-damage
+    # function tables) and cached in session_state.
+    # ========================================================================
+    _OCC_FULL = {
+        "RES1": "Single Family Dwelling", "RES2": "Manufactured Housing",
+        "RES3A": "Multi-Family Duplex", "RES3B": "Multi-Family (3-4 Units)",
+        "RES3C": "Multi-Family (5-9 Units)", "RES3D": "Multi-Family (10-19 Units)",
+        "RES3E": "Multi-Family (20-49 Units)", "RES3F": "Multi-Family (50+ Units)",
+        "RES4": "Temporary Lodging", "RES5": "Institutional Dormitory", "RES6": "Nursing Home",
+        "COM1": "Retail Trade", "COM2": "Wholesale Trade", "COM3": "Personal & Repair Services",
+        "COM4": "Professional/Technical", "COM5": "Banks/Financial", "COM6": "Hospital",
+        "COM7": "Medical Office/Clinic", "COM8": "Entertainment & Recreation", "COM9": "Theaters",
+        "COM10": "Parking", "IND1": "Heavy Industrial", "IND2": "Light Industrial",
+        "IND3": "Food/Drugs/Chemicals", "IND4": "Metals/Minerals Processing", "IND5": "High Technology",
+        "IND6": "Construction", "AGR1": "Agriculture", "REL1": "Church/Non-Profit",
+        "GOV1": "General Government", "GOV2": "Emergency Response", "EDU1": "Schools (K-12)",
+        "EDU2": "Colleges/Universities",
+    }
+
+    def _frag_parse_csv(_file):
+        """Read an uploaded depth-damage CSV -> (DataFrame, {col: depth_ft}, key_col)."""
+        _df = pd.read_csv(_file)
+        depth_map = {}
+        for c in _df.columns:
+            cs = str(c).strip().lower()
+            mm = _re.fullmatch(r"m(\d+(?:\.\d+)?)", cs)
+            pp = _re.fullmatch(r"p(\d+(?:\.\d+)?)", cs)
+            if mm:
+                depth_map[c] = -float(mm.group(1))
+            elif pp:
+                depth_map[c] = float(pp.group(1))
+        if not depth_map:  # fallback: numeric headers like -4 ... 24
+            for c in _df.columns:
+                try:
+                    depth_map[c] = float(str(c).strip())
+                except Exception:
+                    pass
+        key_col = None
+        for cand in ["SpecificOccupId", "Occupancy", "Occ", "SOID",
+                     "Specific_Occup", "Description", "DmgFnId"]:
+            if cand in _df.columns:
+                key_col = cand
+                break
+        if key_col is None:
+            nondepth = [c for c in _df.columns if c not in depth_map]
+            key_col = nondepth[0] if nondepth else _df.columns[0]
+        return _df, depth_map, key_col
+
+    def _frag_split_soid(soid):
+        """Parse a Hazus SOID like 'RES1-2SWB' -> (occ, stories, basement)."""
+        s = str(soid).strip().upper()
+        m = _re.match(r"^([A-Z]+\d+[A-Z]?)-(\d+|S)S?([NW]B)?$", s)
+        if m:
+            occ = m.group(1)
+            st_raw = m.group(2)
+            stories = ("Split" if st_raw == "S" else st_raw)
+            base = m.group(3)
+            basement = ("With basement" if base == "WB"
+                        else "No basement" if base == "NB" else "\u2014")
+            return occ, stories, basement
+        m2 = _re.match(r"^([A-Z]+\d+[A-Z]?)", s)
+        return (m2.group(1) if m2 else s), "\u2014", "\u2014"
+
+    def _frag_long(_parsed):
+        """(df, depth_map, key_col) -> tidy rows: occ, stories, basement, soid, depth, pct."""
+        _df, depth_map, key_col = _parsed
+        rows = []
+        for _, r in _df.iterrows():
+            occ, stories, basement = _frag_split_soid(r[key_col])
+            for c, d in depth_map.items():
+                try:
+                    v = float(r[c])
+                except Exception:
+                    continue
+                rows.append((occ, stories, basement, str(r[key_col]).strip(), d, v))
+        return pd.DataFrame(rows, columns=["occ", "stories", "basement", "soid", "depth", "pct"])
+
+    def render_fragility_curves(building_row=None, ctx="frag"):
+        # 1) ensure curve data is loaded
+        if ss.get("_frag_S") is None or ss.get("_frag_C") is None:
+            st.info(
+                "Upload the FEMA/Hazus depth-damage curve files to enable fragility curves. "
+                "These are the FAST **structure** and **content** depth-damage function tables "
+                "(one % value per flood depth, with a column identifying the occupancy/structure "
+                "type, e.g. `RES1-2SNB`)."
+            )
+            cA, cB = st.columns(2)
+            with cA:
+                upS = st.file_uploader("Structure depth-damage CSV", type=["csv"], key=f"{ctx}_upS")
+            with cB:
+                upC = st.file_uploader("Content depth-damage CSV", type=["csv"], key=f"{ctx}_upC")
+            if upS is not None and upC is not None:
+                try:
+                    ss["_frag_S"] = _frag_long(_frag_parse_csv(upS))
+                    ss["_frag_C"] = _frag_long(_frag_parse_csv(upC))
+                    st.rerun()
+                except Exception as _e:
+                    st.error(f"Could not parse the curve files: {_e}")
+            return
+
+        S = ss["_frag_S"]
+        C = ss["_frag_C"]
+        if S is None or S.empty:
+            st.warning("No depth-damage rows were detected in the uploaded structure file.")
+            if st.button("Clear uploaded curves", key=f"{ctx}_clr0"):
+                ss.pop("_frag_S", None)
+                ss.pop("_frag_C", None)
+                st.rerun()
+            return
+
+        occs = sorted(S["occ"].unique())
+
+        # derive defaults from a building row when embedded
+        bld_occ = bld_base = None
+        if building_row is not None:
+            raw_occ = str(building_row.get("occupancy_type", "") or building_row.get("SOID", "") or "")
+            bld_occ, _bs, bld_base = _frag_split_soid(raw_occ)
+            if bld_occ not in occs:
+                bld_occ = next((o for o in occs if raw_occ.upper().startswith(o)), None)
+
+        c1, c2 = st.columns(2)
+        with c1:
+            _oi = occs.index(bld_occ) if (bld_occ in occs) else 0
+            sel_occ = st.selectbox(
+                "Occupancy", occs, index=_oi, key=f"{ctx}_occ",
+                format_func=lambda o: (f"{o} \u2014 {_OCC_FULL[o]}" if o in _OCC_FULL else o),
+            )
+        bases = sorted(S[S["occ"] == sel_occ]["basement"].unique())
+        with c2:
+            if len(bases) > 1:
+                _bi = bases.index(bld_base) if (bld_base in bases) else 0
+                sel_base = st.selectbox("Basement", bases, index=_bi, key=f"{ctx}_base")
+            else:
+                sel_base = bases[0] if bases else "\u2014"
+                st.selectbox("Basement", (bases or ["\u2014"]), index=0,
+                             key=f"{ctx}_base", disabled=True)
+
+        def _story_key(x):
+            sx = str(x)
+            return (1, 99) if sx == "Split" else (0, int(sx)) if sx.isdigit() else (2, 0)
+
+        def _plot(_df, _title):
+            sub = _df[(_df["occ"] == sel_occ) & (_df["basement"] == sel_base)]
+            if sub.empty:
+                st.info(f"No {_title.lower()} curve for this selection.")
+                return
+            fig = go.Figure()
+            for stv in sorted(sub["stories"].unique(), key=_story_key):
+                _s = sub[sub["stories"] == stv].sort_values("depth")
+                lbl = (f"{stv}-story" if str(stv).isdigit() else str(stv))
+                fig.add_trace(go.Scatter(
+                    x=_s["depth"], y=_s["pct"], mode="lines+markers", name=lbl,
+                ))
+            fig.update_layout(
+                title=_title,
+                xaxis_title="Flood depth above first floor (ft)",
+                yaxis_title="Damage (% of value)",
+                height=380, margin=dict(l=10, r=10, t=42, b=10),
+                legend=dict(orientation="h", y=-0.28),
+            )
+            st.plotly_chart(fig, use_container_width=True, key=f"{ctx}_{_title}")
+
+        p1, p2 = st.columns(2)
+        with p1:
+            _plot(S, "Structure damage")
+        with p2:
+            _plot(C, "Content damage")
+        st.caption(
+            "Each line is a different number-of-stories variant for the selected occupancy "
+            "and basement condition. Source: uploaded FEMA/Hazus depth-damage functions."
         )
-
-        st.divider()
-        n_loaded = df_buildings['id'].nunique()
-        st.caption(f"**Buildings loaded:** {n_loaded:,}")
-        if loc_entry is not None:
-            skipped_df = loc_entry.get('skipped')
-            if isinstance(skipped_df, pd.DataFrame) and len(skipped_df) > 0:
-                n_skipped = len(skipped_df)
-                plural = 's' if n_skipped != 1 else ''
-                st.caption(
-                    f"\u26a0\ufe0f {n_skipped} building{plural} excluded from the analysis "
-                    f"(see *Data Notes* below the map)."
-                )
-            bfe_ft = loc_entry.get('bfe_ft')
-            if bfe_ft is not None:
-                st.caption(f"BFE: **{bfe_ft:g} ft NAVD88** (DFE = BFE+2)")
-
-    if active != V_SETTINGS:
-        st.markdown(
-            "<style>.st-key-adapt_settings_panel{display:none !important;}</style>",
-            unsafe_allow_html=True,
-        )
+        if building_row is None:
+            if st.button("Replace uploaded curve files", key=f"{ctx}_clr1"):
+                for _k in ("_frag_S", "_frag_C"):
+                    ss.pop(_k, None)
+                st.rerun()
 
     # ========================================================================
     # TAB: FLOOD MAPS — bathtub inundation for user-specified water levels
@@ -3327,6 +3469,10 @@ def main():
                 st.caption("The projected still-water surface elevation itself (present-day level + sea-level rise).")
                 st.dataframe(_build_table('navd88'), use_container_width=True)
 
+                st.divider()
+                st.markdown("##### 📈 Fragility curves for this building")
+                render_fragility_curves(building_row=_brow, ctx="frag_nonres")
+
     # ========================================================================
     # TAB: PER-BUILDING ANALYSIS — cross-building distributions + Plots 3/4/5
     # ========================================================================
@@ -3334,7 +3480,7 @@ def main():
         st.markdown(
             '<p class="tab-description">Distribution of cumulative damage <b>across individual buildings</b> '
             'and counts of buildings by adaptation effectiveness. <b>Both SLR scenarios</b> are shown '
-            'side-by-side for the selected target year, regardless of the SLR Scenario chosen in the sidebar. '
+            'side-by-side for the selected target year, regardless of the SLR Scenario chosen above. '
             'For the community-aggregated distribution (community totals across Monte Carlo realizations), '
             'see the Community Summary tab.</p>',
             unsafe_allow_html=True
@@ -3866,39 +4012,49 @@ def main():
         elif df_buildings is not None:
             st.subheader(f"Building Risk Map — {location_name} ({occupancy_label}) — {target_year}, {scenario}")
 
-            map_view = st.radio(
-                "Map View",
-                options=["Damage Heatmap", "Damage Bins", "Adaptation Effectiveness"],
-                horizontal=True,
-                key="map_view_selector",
-                help=(
-                    "**Damage Heatmap**: continuous color by No-Mitigation P50 cumulative damage. "
-                    "**Damage Bins**: discrete bins of upper-tail damage with breakpoints fixed across years. "
-                    "**Adaptation Effectiveness**: classifies each building by which retrofit eliminates upper-tail damage."
-                ),
-            )
+            # Map View and Basemap on a single line, side by side.
+            _mv_col, _bm_col = st.columns(2)
+            with _mv_col:
+                map_view = st.radio(
+                    "Map View",
+                    options=["Damage Heatmap", "Damage Bins", "Adaptation Effectiveness"],
+                    horizontal=True,
+                    key="map_view_selector",
+                    help=(
+                        "**Damage Heatmap**: continuous color by No-Mitigation P50 cumulative damage. "
+                        "**Damage Bins**: discrete bins of upper-tail damage with breakpoints fixed across years. "
+                        "**Adaptation Effectiveness**: classifies each building by which retrofit eliminates upper-tail damage."
+                    ),
+                )
+            with _bm_col:
+                # "Streets" = OpenStreetMap; "Aerial" overlays ESRI World
+                # Imagery. Remembered globally (one key, not per-location).
+                basemap_choice = st.radio(
+                    "Basemap",
+                    options=["Streets", "Aerial"],
+                    horizontal=True,
+                    key="map_basemap_choice",
+                    help=(
+                        "**Streets**: OpenStreetMap road network and place labels. "
+                        "**Aerial**: satellite imagery (ESRI World Imagery) — useful for "
+                        "spotting individual buildings, parking lots, vegetation, and "
+                        "shoreline detail. Requires internet access at render time; if "
+                        "the tile server is unreachable the map will fall back to a "
+                        "white background."
+                    ),
+                )
 
-            # Basemap choice for the live map. "Streets" is the original
-            # OpenStreetMap default; "Aerial" overlays ESRI World Imagery
-            # tiles, which is useful for locating individual buildings,
-            # spotting parking lots, vegetation, and shoreline detail
-            # that an abstract street map doesn't show. The choice is
-            # remembered globally (one key, not per-location) since it's
-            # a UI preference rather than data.
-            basemap_choice = st.radio(
-                "Basemap",
-                options=["Streets", "Aerial"],
-                horizontal=True,
-                key="map_basemap_choice",
-                help=(
-                    "**Streets**: OpenStreetMap road network and place labels. "
-                    "**Aerial**: satellite imagery (ESRI World Imagery) — useful for "
-                    "spotting individual buildings, parking lots, vegetation, and "
-                    "shoreline detail. Requires internet access at render time; if "
-                    "the tile server is unreachable the map will fall back to a "
-                    "white background."
-                ),
-            )
+            # Map data filters (kept with the map rather than in the title
+            # settings row). Bound to the same committed keys the pipeline
+            # reads, so changes apply to the map immediately.
+            _df_col, _sz_col = st.columns([3, 2])
+            with _df_col:
+                if fp_options:
+                    ss.w_dfe = ss.cv_dfe
+                    st.multiselect("DFE status filter", fp_options, key="w_dfe", on_change=_cb_dfe)
+            with _sz_col:
+                ss.w_showzero = ss.cv_showzero
+                st.checkbox("Show buildings with $0 damage", key="w_showzero", on_change=_cb_zero)
             
             # ----------------------------------------------------------
             # Building-ID search — drops a temporary highlight ring on
@@ -4258,6 +4414,24 @@ def main():
                             _default_map_zoom = 15.5
                     except Exception:
                         _default_map_zoom = 15.5
+
+                    # Tighter framing for the Pamunkey study area using the
+                    # team-supplied corner coordinates, so the initial view
+                    # focuses on the village rather than the full extent.
+                    if selected_location == "Pamunkey":
+                        _pam_lat = [37.5830, 37.5831, 37.5639, 37.5633]
+                        _pam_lon = [-76.9852, -77.0255, -77.0257, -76.9844]
+                        center_lat = sum(_pam_lat) / len(_pam_lat)
+                        center_lon = sum(_pam_lon) / len(_pam_lon)
+                        try:
+                            _plon = max((max(_pam_lon) - min(_pam_lon)) * 1.12, 1e-3)
+                            _plat = max((max(_pam_lat) - min(_pam_lat)) * 1.12, 1e-3)
+                            _pz_lon = math.log2(360.0 / _plon)
+                            _pcl = max(math.cos(math.radians(center_lat)), 1e-6)
+                            _pz_lat = math.log2((360.0 / (_plat * 1.4)) * _pcl)
+                            _default_map_zoom = float(max(min(min(_pz_lon, _pz_lat) + 0.4, 17.5), 13.5))
+                        except Exception:
+                            _default_map_zoom = 14.5
 
                     # `_point_scale` is set by the "Point size" slider at the
                     # top of the map tab (see search_col3 above). All map
@@ -5290,7 +5464,7 @@ def main():
                 f"<p style='color:#64748b;font-size:0.95rem;margin-top:-0.5rem;'>"
                 "Distribution of <b>community-total</b> cumulative damage across Monte Carlo "
                 "realizations. Both SLR scenarios are shown side-by-side, regardless of the "
-                "SLR Scenario chosen in the sidebar.</p>",
+                "SLR Scenario chosen above.</p>",
                 unsafe_allow_html=True,
             )
             
@@ -6056,7 +6230,7 @@ def main():
                             "in parentheses. Depths are computed from this "
                             "building's ground elevation and the simulated "
                             "annual-maximum water-level percentile under the "
-                            "selected SLR scenario; switch SLR in the sidebar "
+                            "selected SLR scenario; switch SLR above "
                             "to compare. "
                             "*Note:* the three return-period proxies use "
                             "P01 / P10 / P99 of the annual-maximum distribution "
@@ -6165,7 +6339,7 @@ def main():
                     st.divider()
                     st.subheader("Retrofit options — figures for the action slides")
                     st.caption(
-                        f"Computed under **{_scn_lbl_cards}** (switch SLR in the sidebar). "
+                        f"Computed under **{_scn_lbl_cards}** (switch SLR above). "
                         f"Benefit = avoided cumulative recovery cost vs. taking no action; remaining = the cost "
                         f"that still occurs with the action. Median with (low–high) range. Each box is one slide."
                     )
@@ -6581,7 +6755,7 @@ def main():
                             "**Strategy performance across all planning horizons**  \n"
                             f"<span style='color:#64748b;font-size:0.9rem;'>"
                             f"Building #{selected_id} — {scenario_label} "
-                            "(change the SLR Scenario in the sidebar to see the other)</span>",
+                            "(change the SLR Scenario above to see the other)</span>",
                             unsafe_allow_html=True,
                         )
                         
@@ -6602,6 +6776,10 @@ def main():
                                 "given strategy performs in 2040 vs 2055 vs 2060 vs 2100 — and how its benefit "
                                 "and remaining damage evolve as sea level rises."
                             )
+
+                st.divider()
+                st.markdown("##### 📈 Fragility curves for this building")
+                render_fragility_curves(building_row=building_info, ctx="frag_res")
         else:
             st.warning("No per-building data available for this location.")
     
@@ -6789,6 +6967,19 @@ def main():
             st.warning("No data available for this location.")
 
     # ========================================================================
+    # FRAGILITY CURVES VIEW
+    # ========================================================================
+    if active == V_FRAG:
+        st.markdown(
+            '<p class="tab-description">Explore FEMA/Hazus depth-damage (fragility) curves. '
+            'Pick a building type and condition and the tool overlays the structure- and '
+            'content-damage curves for each number of stories on one plot. Upload your FEMA '
+            'depth-damage curve files once; they are reused here and in the example-building tabs.</p>',
+            unsafe_allow_html=True,
+        )
+        render_fragility_curves(building_row=None, ctx="frag_main")
+
+    # ========================================================================
     # FOOTER
     # ========================================================================
     st.divider()
@@ -6800,8 +6991,7 @@ def main():
             Columbia University
         </div>
         <div class="footer-license">
-            © 2025 Erfan Amini. All rights reserved.<br>
-            DFE = Design Flood Elevation (BFE+2)
+            © 2025 Erfan Amini. All rights reserved.
         </div>
     </div>
     """, unsafe_allow_html=True)
