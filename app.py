@@ -2622,32 +2622,6 @@ def main():
         V_NONRES:   ["location"],
         # V_FLOOD, V_ROADS, V_FRAG -> no global settings row
     }
-    if active in _PAGE_SETTINGS:
-        render_inline_settings(_PAGE_SETTINGS[active])
-
-    # ========================================================================
-    # FRAGILITY CURVES (FEMA / Hazus depth-damage functions)
-    # Shared renderer: used by the "Fragility curves" view and embedded, per
-    # selected building, in the Residential / Non-residential example tabs.
-    # Curve CSVs are uploaded in-app (FAST structure- and content-damage
-    # function tables) and cached in session_state.
-    # ========================================================================
-    _OCC_FULL = {
-        "RES1": "Single Family Dwelling", "RES2": "Manufactured Housing",
-        "RES3A": "Multi-Family Duplex", "RES3B": "Multi-Family (3-4 Units)",
-        "RES3C": "Multi-Family (5-9 Units)", "RES3D": "Multi-Family (10-19 Units)",
-        "RES3E": "Multi-Family (20-49 Units)", "RES3F": "Multi-Family (50+ Units)",
-        "RES4": "Temporary Lodging", "RES5": "Institutional Dormitory", "RES6": "Nursing Home",
-        "COM1": "Retail Trade", "COM2": "Wholesale Trade", "COM3": "Personal & Repair Services",
-        "COM4": "Professional/Technical", "COM5": "Banks/Financial", "COM6": "Hospital",
-        "COM7": "Medical Office/Clinic", "COM8": "Entertainment & Recreation", "COM9": "Theaters",
-        "COM10": "Parking", "IND1": "Heavy Industrial", "IND2": "Light Industrial",
-        "IND3": "Food/Drugs/Chemicals", "IND4": "Metals/Minerals Processing", "IND5": "High Technology",
-        "IND6": "Construction", "AGR1": "Agriculture", "REL1": "Church/Non-Profit",
-        "GOV1": "General Government", "GOV2": "Emergency Response", "EDU1": "Schools (K-12)",
-        "EDU2": "Colleges/Universities",
-    }
-
     # Short, web-sourced flood-context blurbs shown on the Overview page.
     # Sources: National Trust for Historic Preservation, NOAA, USGS, VIMS,
     # pamunkey.org (2025); sealevelrise.org / Woods Hole (Chesapeake).
@@ -2681,6 +2655,44 @@ def main():
             if _k.lower() in str(_loc).lower():
                 return _v
         return _LOC_BLURB_DEFAULT
+
+    if active == V_OVERVIEW:
+        # Location flood-context blurb — shown above the settings row.
+        st.markdown(
+            '<div style="background:#eff6ff; border-left:4px solid #0ea5e9; '
+            'border-radius:6px; padding:0.7rem 0.95rem; margin:0.1rem 0 0.9rem 0; '
+            'color:#0f172a; font-size:0.92rem; line-height:1.45;">'
+            f'<span style="font-weight:700;">📍 {location_name}</span> &nbsp;·&nbsp; '
+            f'{_location_blurb(selected_location)}'
+            '</div>',
+            unsafe_allow_html=True,
+        )
+
+    if active in _PAGE_SETTINGS:
+        render_inline_settings(_PAGE_SETTINGS[active])
+
+    # ========================================================================
+    # FRAGILITY CURVES (FEMA / Hazus depth-damage functions)
+    # Shared renderer: used by the "Fragility curves" view and embedded, per
+    # selected building, in the Residential / Non-residential example tabs.
+    # Curve CSVs are uploaded in-app (FAST structure- and content-damage
+    # function tables) and cached in session_state.
+    # ========================================================================
+    _OCC_FULL = {
+        "RES1": "Single Family Dwelling", "RES2": "Manufactured Housing",
+        "RES3A": "Multi-Family Duplex", "RES3B": "Multi-Family (3-4 Units)",
+        "RES3C": "Multi-Family (5-9 Units)", "RES3D": "Multi-Family (10-19 Units)",
+        "RES3E": "Multi-Family (20-49 Units)", "RES3F": "Multi-Family (50+ Units)",
+        "RES4": "Temporary Lodging", "RES5": "Institutional Dormitory", "RES6": "Nursing Home",
+        "COM1": "Retail Trade", "COM2": "Wholesale Trade", "COM3": "Personal & Repair Services",
+        "COM4": "Professional/Technical", "COM5": "Banks/Financial", "COM6": "Hospital",
+        "COM7": "Medical Office/Clinic", "COM8": "Entertainment & Recreation", "COM9": "Theaters",
+        "COM10": "Parking", "IND1": "Heavy Industrial", "IND2": "Light Industrial",
+        "IND3": "Food/Drugs/Chemicals", "IND4": "Metals/Minerals Processing", "IND5": "High Technology",
+        "IND6": "Construction", "AGR1": "Agriculture", "REL1": "Church/Non-Profit",
+        "GOV1": "General Government", "GOV2": "Emergency Response", "EDU1": "Schools (K-12)",
+        "EDU2": "Colleges/Universities",
+    }
 
     # --- Parse a FAST curve Description into (stories, basement, zone) ---
     def _frag_parse_desc(desc):
@@ -5561,16 +5573,6 @@ def main():
     # ========================================================================
     if active == V_OVERVIEW:
         st.markdown('<p class="tab-description">Aggregated community-wide damage statistics comparing all adaptation strategies, separated by buildings Under DFE and Above DFE.</p>', unsafe_allow_html=True)
-
-        st.markdown(
-            '<div style="background:#eff6ff; border-left:4px solid #0ea5e9; '
-            'border-radius:6px; padding:0.7rem 0.95rem; margin:0.1rem 0 0.9rem 0; '
-            'color:#0f172a; font-size:0.92rem; line-height:1.45;">'
-            f'<span style="font-weight:700;">📍 {location_name}</span> &nbsp;·&nbsp; '
-            f'{_location_blurb(selected_location)}'
-            '</div>',
-            unsafe_allow_html=True,
-        )
         
         if df_agg is not None:
             st.subheader(f"Community-Wide Damage Summary — {location_name} ({occupancy_label}) — {target_year}, {scenario}")
