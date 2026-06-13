@@ -2364,6 +2364,17 @@ def main():
     # ---- Navigation rail (rendered in the sidebar; CSS below flips it to
     #      the right edge and styles it as the dark ADAPT rail). Using the
     #      sidebar gives a stable selector across Streamlit versions. ----
+    # Location is a GLOBAL control: it lives in the rail directly under the
+    # brand and drives every tab (including the NSI dataset tab), so it is no
+    # longer rendered as a per-page setting. cv_location is initialized here
+    # (before the widget) so the sidebar selectbox can bind to it.
+    def _cb_loc():  ss.cv_location = ss.w_location
+    if available_locations:
+        if "cv_location" not in ss:
+            ss.cv_location = "Pamunkey" if "Pamunkey" in available_locations else available_locations[0]
+        if ss.cv_location not in available_locations:
+            ss.cv_location = available_locations[0]
+
     with st.sidebar:
         if os.path.exists("logo.png"):
             st.image("logo.png", use_container_width=True)
@@ -2376,6 +2387,11 @@ def main():
                 '</div>',
                 unsafe_allow_html=True,
             )
+        # Global location selector — directly under the brand.
+        if available_locations:
+            ss.w_location = ss.cv_location
+            st.selectbox("\U0001f4cd Location", available_locations,
+                         key="w_location", on_change=_cb_loc)
         active = st.radio(
             "Navigation", options=VIEWS, key="adapt_active_view",
             label_visibility="collapsed",
@@ -2396,19 +2412,16 @@ def main():
 
     # ========================================================================
     # COMMITTED FILTER STATE (cv_*) + on_change callbacks
+    # (cv_location + _cb_loc are set up earlier, next to the global rail
+    # selector, so location can be committed before the sidebar renders.)
     # ========================================================================
-    def _cb_loc():  ss.cv_location = ss.w_location
     def _cb_occ():  ss.cv_occ = ss.w_occ
     def _cb_year(): ss.cv_year = ss.w_year
     def _cb_scn():  ss.cv_scn = ss.w_scn
     def _cb_dfe():  ss.cv_dfe = ss.w_dfe
     def _cb_zero(): ss.cv_showzero = ss.w_showzero
 
-    # --- Location (default Pamunkey when present, else first available) ---
-    if "cv_location" not in ss:
-        ss.cv_location = "Pamunkey" if "Pamunkey" in available_locations else available_locations[0]
-    if ss.cv_location not in available_locations:
-        ss.cv_location = available_locations[0]
+    # --- Location is committed by the global rail selector above. ---
     selected_location = ss.cv_location
 
     ss.setdefault("cv_occ", "All")
@@ -2611,11 +2624,7 @@ def main():
         cols = st.columns(len(items))
         for _col, name in zip(cols, items):
             with _col:
-                if name == "location":
-                    ss.w_location = ss.cv_location
-                    st.selectbox("\U0001f4cd Location", available_locations,
-                                 key="w_location", on_change=_cb_loc)
-                elif name == "occ":
+                if name == "occ":
                     ss.w_occ = ss.cv_occ
                     st.selectbox("\U0001f3e0 Occupancy", ["All", "Residential", "Non-Residential"],
                                  key="w_occ", on_change=_cb_occ, format_func=_occ_fmt)
@@ -2635,12 +2644,13 @@ def main():
                     st.checkbox("Show $0 buildings", key="w_showzero", on_change=_cb_zero)
 
     _PAGE_SETTINGS = {
-        V_MAP:      ["location", "occ", "year", "scn"],
-        V_OVERVIEW: ["location", "occ", "year", "scn"],
-        V_DIST:     ["location", "occ", "year", "scn"],
-        V_RES:      ["location", "year", "scn"],
-        V_NONRES:   ["location"],
-        # V_FLOOD, V_ROADS, V_FRAG -> no global settings row
+        V_MAP:      ["occ", "year", "scn"],
+        V_OVERVIEW: ["occ", "year", "scn"],
+        V_DIST:     ["occ", "year", "scn"],
+        V_RES:      ["year", "scn"],
+        # V_NONRES previously showed only the location selector, which is now
+        # global; it therefore has no per-page settings row.
+        # V_FLOOD, V_ROADS, V_NSI, V_FRAG -> no global settings row
     }
     # Short, web-sourced flood-context blurbs shown on the Overview page.
     # Sources: National Trust for Historic Preservation, NOAA, USGS, VIMS,
@@ -7175,9 +7185,21 @@ def main():
                 "in the deployment so the NSI dataset tab can load."
             )
         else:
+            # Pass the GLOBAL location into the embedded tool. The survey app
+            # keys its locations by slug (e.g. 'Mastic Beach' -> 'masticbeach');
+            # we normalize the rail's location name the same way and inject it
+            # as window.__ADAPT_LOCATION, which the tool reads as its initial
+            # location. Changing the rail selector re-runs Streamlit with a new
+            # injected value, so the iframe reloads on the new location. If the
+            # tool doesn't know the slug, it falls back to its own default.
+            _slug = _re.sub(r'[^a-z0-9]', '', str(selected_location).lower())
+            _inject = '<script>window.__ADAPT_LOCATION = "%s";</script>\n' % _slug
+            nsi_html_loc = nsi_html.replace(
+                '<script type="text/babel">',
+                _inject + '<script type="text/babel">', 1)
             # Fixed pixel height for the iframe; the embedded app's flex column
             # splits it into the top control bar plus the map/right-panel row.
-            _components.html(nsi_html, height=900, scrolling=False)
+            _components.html(nsi_html_loc, height=900, scrolling=False)
 
     # ========================================================================
     # FRAGILITY CURVES VIEW

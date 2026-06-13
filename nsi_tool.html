@@ -448,7 +448,13 @@ function App() {
   const mrkRv = isMobile ? 9 : 6;
   const mrkRsel = isMobile ? 14 : 10;
 
-  const [curLoc, setCurLoc] = useState("masticbeach");
+  // Initial location comes from the embedding app (ADAPT global rail). It is
+  // injected as window.__ADAPT_LOCATION (an app2 slug) before this script
+  // runs. Fall back to 'masticbeach' if absent or unknown.
+  const _injLoc = (typeof window !== "undefined" && window.__ADAPT_LOCATION
+                   && LOCATIONS[window.__ADAPT_LOCATION])
+                  ? window.__ADAPT_LOCATION : "masticbeach";
+  const [curLoc, setCurLoc] = useState(_injLoc);
   const curLocRef = useRef(curLoc);
 
   const switchLocation = useCallback(async (newLoc) => {
@@ -675,7 +681,8 @@ function App() {
     script.src = "https://cdnjs.cloudflare.com/ajax/libs/leaflet/1.9.4/leaflet.min.js";
     script.onload = () => {
       const L = window.L;
-      const map = L.map(mapRef.current, { zoomControl: false }).setView([40.761, -72.848], 13);
+      const _loc0 = LOCATIONS[curLocRef.current] || LOCATIONS.masticbeach;
+      const map = L.map(mapRef.current, { zoomControl: false }).setView(_loc0.center, _loc0.zoom);
       L.control.zoom({ position: "topright" }).addTo(map);
       const streetLayer = L.tileLayer("https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png", {
         attribution: "&copy; OSM", maxZoom: 19,
@@ -1525,9 +1532,12 @@ function App() {
             </div>
           </div>
 
-          <select value={curLoc} onChange={e => switchLocation(e.target.value)} style={{width:220,padding:"7px 10px",borderRadius:7,border:"1px solid #334155",background:"#1e293b",color:"#e2e8f0",fontSize:13,fontWeight:600,cursor:"pointer",appearance:"auto"}}>
-            {Object.entries(LOCATIONS).map(([k,v]) => <option key={k} value={k}>{v.name}</option>)}
-          </select>
+          {/* Location is controlled by the ADAPT global rail (left sidebar),
+              not here. Shown read-only so the surveyor sees the active site. */}
+          <div style={{width:220,padding:"7px 10px",borderRadius:7,border:"1px solid #334155",background:"#1e293b",color:"#94a3b8",fontSize:12,fontWeight:600,display:"flex",alignItems:"center",gap:8}}>
+            <span style={{color:"#64748b",fontSize:11,fontWeight:700,textTransform:"uppercase",letterSpacing:.5}}>Location</span>
+            <span style={{color:"#e2e8f0"}}>{LOCATIONS[curLoc].name}</span>
+          </div>
           </div>
 
           {/* ─── Progress ─── */}
