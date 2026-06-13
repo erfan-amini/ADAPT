@@ -405,6 +405,25 @@ def load_csv_file(filepath):
     return pd.read_csv(filepath)
 
 
+@st.cache_data
+def load_nsi_tool_html():
+    """Read the embedded NSI Field Survey tool (nsi_tool.html).
+
+    This is the standalone React/Leaflet survey app (`app2`), reworked so
+    its controls sit in a top bar and its building-detail form stays as a
+    right panel. It is shipped as a sibling asset rather than inlined so it
+    stays editable on its own. The file must live next to app.py for the
+    'NSI dataset' tab to render. Returns None (and the tab shows a hint) if
+    the asset is missing from the deployment."""
+    here = os.path.dirname(os.path.abspath(__file__))
+    for cand in (os.path.join(here, 'nsi_tool.html'),
+                 os.path.join('.', 'nsi_tool.html')):
+        if os.path.exists(cand):
+            with open(cand, 'r', encoding='utf-8') as fh:
+                return fh.read()
+    return None
+
+
 # ----------------------------------------------------------------------------
 # CSV-bundle loader (current ADAPT data format)
 # ----------------------------------------------------------------------------
@@ -2332,8 +2351,9 @@ def main():
     V_DIST = "\U0001f4e6 Distributions"
     V_RES = "\U0001f3e0 Residential example"
     V_NONRES = "\U0001f3e2 Non-residential example"
+    V_NSI = "\U0001f5c2\ufe0f NSI dataset"
     V_FRAG = "\U0001f4c8 Fragility curves"
-    VIEWS = [V_OVERVIEW, V_FLOOD, V_MAP, V_ROADS, V_DIST, V_RES, V_NONRES, V_FRAG]
+    VIEWS = [V_OVERVIEW, V_MAP, V_FLOOD, V_ROADS, V_DIST, V_RES, V_NONRES, V_NSI, V_FRAG]
 
     def _keyed_container(_key):
         try:
@@ -7127,6 +7147,37 @@ def main():
             st.dataframe(df_display, use_container_width=True, hide_index=True)
         else:
             st.warning("No data available for this location.")
+
+    # ========================================================================
+    # NSI DATASET VIEW  (embedded field-survey tool — app2)
+    # ------------------------------------------------------------------------
+    # Self-contained React/Leaflet survey app, embedded via components.html.
+    # It is fully isolated from the rest of ADAPT: it does not read or write
+    # any of the location/occupancy/year/scenario filters above, and it talks
+    # to its own backend (Google Apps Script + ArcGIS/USGS/OSM). Its controls
+    # render as a top bar and its building-detail form as a right panel, so it
+    # matches the layout of the other tabs. No global settings row is shown
+    # for this tab (V_NSI is intentionally absent from _PAGE_SETTINGS).
+    # ========================================================================
+    if active == V_NSI:
+        st.markdown(
+            '<p class="tab-description">Field-survey and verification tool for the '
+            'National Structure Inventory. Pick a location and walk the map to add, '
+            'verify, move, or flag buildings; the right panel holds the per-building '
+            'detail form. This tab is standalone and does not affect the damage '
+            'tabs.</p>',
+            unsafe_allow_html=True,
+        )
+        nsi_html = load_nsi_tool_html()
+        if nsi_html is None:
+            st.error(
+                "\u26a0\ufe0f `nsi_tool.html` not found. Place it next to `app.py` "
+                "in the deployment so the NSI dataset tab can load."
+            )
+        else:
+            # Fixed pixel height for the iframe; the embedded app's flex column
+            # splits it into the top control bar plus the map/right-panel row.
+            _components.html(nsi_html, height=900, scrolling=False)
 
     # ========================================================================
     # FRAGILITY CURVES VIEW
