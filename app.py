@@ -1277,14 +1277,7 @@ kOKVkCAqL30KICAgICAgPGRpdiBzdHlsZT17e3dpZHRoOiIxMDAlIixib3JkZXJCb3R0b206IjFweCBz
 YWNrZ3JvdW5kOiJsaW5lYXItZ3JhZGllbnQoMTgwZGVnLCMwZjE3MmEsIzExMTgyNykiLGZsZXhTaHJpbms6MCxwb3NpdGlvbjoi
 cmVsYXRpdmUiLHpJbmRleDoyMDAwfX0+CiAgICAgICAgPGRpdiBzdHlsZT17e3BhZGRpbmc6IjdweCAxMnB4IixkaXNwbGF5OiJm
 bGV4IixmbGV4RGlyZWN0aW9uOiJyb3ciLGZsZXhXcmFwOiJ3cmFwIixhbGlnbkl0ZW1zOiJjZW50ZXIiLGdhcDoiOHB4IDlweCJ9
-fT4KCiAgICAgICAgICB7LyogQnJhbmQgKi99CiAgICAgICAgICA8ZGl2IHN0eWxlPXt7ZGlzcGxheToiZmxleCIsYWxpZ25JdGVt
-czoiY2VudGVyIixnYXA6OCxmbGV4OiIwIDAgYXV0byJ9fT4KICAgICAgICAgICAgPGRpdiBzdHlsZT17e3dpZHRoOjMwLGhlaWdo
-dDozMCxib3JkZXJSYWRpdXM6NyxiYWNrZ3JvdW5kOiJsaW5lYXItZ3JhZGllbnQoMTM1ZGVnLCMzYjgyZjYsIzhiNWNmNikiLGRp
-c3BsYXk6ImZsZXgiLGFsaWduSXRlbXM6ImNlbnRlciIsanVzdGlmeUNvbnRlbnQ6ImNlbnRlciIsZm9udFNpemU6MTV9fT7wn4+X
-PC9kaXY+CiAgICAgICAgICAgIDxkaXYgc3R5bGU9e3tmb250V2VpZ2h0OjcwMCxmb250U2l6ZToxNCxjb2xvcjoiI2Y4ZmFmYyIs
-bGluZUhlaWdodDoxLHdoaXRlU3BhY2U6Im5vd3JhcCJ9fT5OU0k8c3BhbiBzdHlsZT17e2ZvbnRTaXplOjEwLGZvbnRXZWlnaHQ6
-NTAwLGNvbG9yOiIjNjQ3NDhiIixtYXJnaW5MZWZ0OjZ9fT5GaWVsZCBTdXJ2ZXk8L3NwYW4+PC9kaXY+CiAgICAgICAgICA8L2Rp
-dj4KCiAgICAgICAgICB7LyogTG9jYXRpb24gKHJlYWQtb25seSDigJQgZHJpdmVuIGJ5IHRoZSBBREFQVCBnbG9iYWwgcmFpbCkg
+fT4KCiAgICAgICAgICB7LyogTG9jYXRpb24gKHJlYWQtb25seSDigJQgZHJpdmVuIGJ5IHRoZSBBREFQVCBnbG9iYWwgcmFpbCkg
 Ki99CiAgICAgICAgICA8ZGl2IHN0eWxlPXt7ZGlzcGxheToiZmxleCIsYWxpZ25JdGVtczoiY2VudGVyIixnYXA6NixmbGV4OiIw
 IDAgYXV0byIscGFkZGluZzoiNXB4IDEwcHgiLGJvcmRlclJhZGl1czo3LGJhY2tncm91bmQ6IiMxZTI5M2IiLGJvcmRlcjoiMXB4
 IHNvbGlkICMzMzQxNTUiLHdoaXRlU3BhY2U6Im5vd3JhcCJ9fT4KICAgICAgICAgICAgPHNwYW4gc3R5bGU9e3tmb250U2l6ZTox
@@ -8517,13 +8510,19 @@ def main():
     # for this tab (V_NSI is intentionally absent from _PAGE_SETTINGS).
     # ========================================================================
     if active == V_NSI:
+        st.markdown(
+            '<p class="tab-description">National Structure Inventory (NSI) field-survey '
+            'tool — walk the map to add, verify, move, or flag buildings and record their '
+            'structural attributes. Edits sync to the shared Google Sheet backend.</p>',
+            unsafe_allow_html=True,
+        )
         # The NSI tool is a self-contained React/Leaflet browser app, so it
         # must live in a component iframe (that is what every Streamlit
         # component is). To make it read as a NATIVE full-page view rather
         # than a small fixed "box", we force its iframe to fill the viewport,
         # strip the frame border, and trim the surrounding block padding.
         # Selectors cover several Streamlit versions; whichever matches wins.
-        # Tune the "150px" offset if you want more/less breathing room above.
+        # Tune the "205px" offset if you want more/less breathing room above.
         st.markdown(
             "<style>"
             "section[data-testid='stMain'] .block-container,"
@@ -8533,7 +8532,7 @@ def main():
             "[data-testid='stMainBlockContainer'] iframe,"
             "section[data-testid='stMain'] iframe,"
             ".main .block-container iframe{"
-            "height:calc(100vh - 150px)!important;min-height:600px!important;"
+            "height:calc(100vh - 205px)!important;min-height:560px!important;"
             "width:100%!important;border:none!important;display:block;"
             "}"
             "</style>",
