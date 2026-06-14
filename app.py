@@ -8517,12 +8517,26 @@ def main():
     # for this tab (V_NSI is intentionally absent from _PAGE_SETTINGS).
     # ========================================================================
     if active == V_NSI:
+        # The NSI tool is a self-contained React/Leaflet browser app, so it
+        # must live in a component iframe (that is what every Streamlit
+        # component is). To make it read as a NATIVE full-page view rather
+        # than a small fixed "box", we force its iframe to fill the viewport,
+        # strip the frame border, and trim the surrounding block padding.
+        # Selectors cover several Streamlit versions; whichever matches wins.
+        # Tune the "150px" offset if you want more/less breathing room above.
         st.markdown(
-            '<p class="tab-description">Field-survey and verification tool for the '
-            'National Structure Inventory. Pick a location and walk the map to add, '
-            'verify, move, or flag buildings; the right panel holds the per-building '
-            'detail form. This tab is standalone and does not affect the damage '
-            'tabs.</p>',
+            "<style>"
+            "section[data-testid='stMain'] .block-container,"
+            "[data-testid='stMainBlockContainer']{padding-top:1.1rem;padding-bottom:0;}"
+            "[data-testid='stCustomComponentV1'],"
+            "[data-testid='stIFrame'],"
+            "[data-testid='stMainBlockContainer'] iframe,"
+            "section[data-testid='stMain'] iframe,"
+            ".main .block-container iframe{"
+            "height:calc(100vh - 150px)!important;min-height:600px!important;"
+            "width:100%!important;border:none!important;display:block;"
+            "}"
+            "</style>",
             unsafe_allow_html=True,
         )
         nsi_html = load_nsi_tool_html()
@@ -8544,8 +8558,9 @@ def main():
             nsi_html_loc = nsi_html.replace(
                 '<script type="text/babel">',
                 _inject + '<script type="text/babel">', 1)
-            # Fixed pixel height for the iframe; the embedded app's flex column
-            # splits it into the top control bar plus the map/right-panel row.
+            # The height arg is a fallback/min; the CSS above stretches the
+            # iframe to fill the viewport. The app's flex column splits that
+            # height into the top toolbar + the map/right-panel row.
             _components.html(nsi_html_loc, height=900, scrolling=False)
 
     # ========================================================================
