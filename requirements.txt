@@ -6,3 +6,6 @@ openpyxl
 python-calamine
 kaleido
 rasterio
+streamlit-folium
+folium
+requests
