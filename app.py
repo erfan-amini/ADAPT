@@ -1742,9 +1742,13 @@ cmlwdD4KPC9ib2R5Pgo8L2h0bWw+
 """
 
 
-@st.cache_data
 def load_nsi_tool_html():
     """Return the NSI Field Survey tool HTML for the 'NSI dataset' tab.
+
+    NOTE: intentionally NOT cached with st.cache_data. That cache keys on the
+    function's code, not on the embedded _NSI_TOOL_HTML_B64 constant, so a
+    cached result would keep serving an old build whenever only the constant
+    changes. Decoding ~100 KB of base64 per run is negligible.
 
     Prefers an on-disk `nsi_tool.html` next to app.py (easy override for
     editing); otherwise decodes the embedded base64 copy, so the app runs as
