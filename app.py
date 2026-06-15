@@ -2344,9 +2344,218 @@ def classify_roads(Zm, ext, roads, wl_ft, prox_m=30.0, sample_m=8.0):
     return segs, counts
 
 
+def classify_roads_access(Zm, ext, roads, wl_ft, sample_m=8.0,
+                          source="boundary", snap_dp=6, boundary_tol_m=35.0):
+    """Topological road-accessibility classifier (replaces the proximity buffer).
+
+    A road is classified by whether you can still REACH it on dry roads, not by
+    how close it sits to water. Status codes match classify_roads so the same
+    renderer/legend plumbing works:
+
+        0 = dry & accessible   (a dry path to the outside world still exists)
+        1 = dry & INACCESSIBLE (dry itself, but every dry route out is severed
+                                by flooding — e.g. both ends flooded, or one end
+                                flooded and the other a dead-end, or stranded
+                                behind a flooded road as part of a cut-off cluster)
+        2 = flooded            (the road surface is below the water level)
+
+    Method. OSM ways carry their topology as *shared vertex coordinates* at
+    intersections (and bridges/overpasses share no node, so they don't connect).
+    We rebuild the network graph by snapping coordinates, mark each span dry or
+    flooded against the same bathtub mask as the Flood Maps tab, then ask a pure
+    reachability question:
+
+        a dry span is INACCESSIBLE  <=>  it is reachable from a SOURCE in the
+        full network (flooded roads treated as passable) but NOT reachable once
+        flooded roads are removed.
+
+    The "full-network" baseline is the causality guard: it ensures we only blame
+    flooding for what flooding actually severed, never roads that were already
+    isolated in the raw OSM data (those are returned as status 0 and tallied in
+    counts['predisc']).
+
+    source: 'boundary' (default) treats roads leaving the map as exits to the
+    wider world — the most defensible anchor when the map is a sub-area of a
+    larger network. 'largest' instead treats the biggest dry component as the
+    mainland; used automatically as a fallback if no boundary exits are found.
+
+    Returns (segments, counts) where segments is a list of
+    ((lon0,lat0),(lon1,lat1),status), drawn at the same ~sample_m resolution as
+    classify_roads so the map detail is unchanged.
+    """
+    from collections import defaultdict
+
+    lon_min, lat_min, lon_max, lat_max = ext
+    nlat, nlon = Zm.shape
+    wl_m = float(wl_ft) * 0.3048
+    Zmask = np.where(np.isnan(Zm), 9999.0, Zm)
+    flood = (wl_m - Zmask > 0) & (Zmask > 0)          # same flood mask as the flood-map tab
+
+    def flooded_fn(lons, lats):
+        # nearest-cell lookup, matching classify_roads' to_rc()
+        c = np.clip(((np.asarray(lons, float) - lon_min) / max(lon_max - lon_min, 1e-9)
+                     * (nlon - 1)).round().astype(int), 0, nlon - 1)
+        r = np.clip(((lat_max - np.asarray(lats, float)) / max(lat_max - lat_min, 1e-9)
+                     * (nlat - 1)).round().astype(int), 0, nlat - 1)
+        return flood[r, c]
+
+    tol_lat = boundary_tol_m / 111320.0
+    midlat = 0.5 * (lat_min + lat_max)
+    tol_lon = boundary_tol_m / (111320.0 * max(math.cos(math.radians(midlat)), 1e-6))
+
+    def nkey(lon, lat):
+        return (round(lon, snap_dp), round(lat, snap_dp))
+
+    def is_boundary(lon, lat):
+        on_lr = ((abs(lon - lon_min) <= tol_lon or abs(lon - lon_max) <= tol_lon)
+                 and (lat_min - tol_lat <= lat <= lat_max + tol_lat))
+        on_tb = ((abs(lat - lat_min) <= tol_lat or abs(lat - lat_max) <= tol_lat)
+                 and (lon_min - tol_lon <= lon <= lon_max + tol_lon))
+        return on_lr or on_tb
+
+    def densify(coords):
+        """Sample ~every sample_m along a way, forcing the original OSM vertices in
+        (so intersections snap) and reporting which samples are real vertices."""
+        lons, lats = coords[:, 0], coords[:, 1]
+        meanlat = float(np.mean(lats))
+        dlat = np.diff(lats) * 111320.0
+        dlon = np.diff(lons) * 111320.0 * math.cos(math.radians(meanlat))
+        cum = np.concatenate([[0.0], np.cumsum(np.sqrt(dlat ** 2 + dlon ** 2))])
+        total = float(cum[-1])
+        if total < 1.0:
+            return None
+        fill = np.linspace(0.0, total, max(int(total / sample_m), 1) + 1)
+        d = np.unique(np.concatenate([cum, fill]))
+        slon = np.interp(d, cum, lons)
+        slat = np.interp(d, cum, lats)
+        return slon, slat, np.isin(d, cum)
+
+    dry_edges = []          # (u, v, [subsegs])
+    all_edges = []          # (u, v) for the baseline (flood-as-passable) graph
+    flooded_subsegs = []
+    node_xy = {}
+
+    for rd in roads:
+        coords = np.asarray(rd["coords"], dtype=float)
+        if len(coords) < 2:
+            continue
+        if not np.any((coords[:, 0] >= lon_min) & (coords[:, 0] <= lon_max) &
+                      (coords[:, 1] >= lat_min) & (coords[:, 1] <= lat_max)):
+            continue
+        dz = densify(coords)
+        if dz is None:
+            continue
+        slon, slat, is_vtx = dz
+        fl = np.asarray(flooded_fn(slon, slat), dtype=bool)
+        n = len(slon)
+        for i in range(n):
+            node_xy.setdefault(nkey(slon[i], slat[i]), (slon[i], slat[i]))
+        brk = np.zeros(n, dtype=bool)
+        brk[0] = brk[-1] = True
+        brk[is_vtx] = True                       # split at intersections
+        trans = np.where(fl[:-1] != fl[1:])[0]   # split at dry/flood transitions
+        brk[trans] = True
+        brk[trans + 1] = True
+        bidx = np.where(brk)[0]
+        for a, b in zip(bidx[:-1], bidx[1:]):
+            u = nkey(slon[a], slat[a]); v = nkey(slon[b], slat[b])
+            if u == v:
+                continue
+            span_flooded = bool(fl[a:b + 1].any())
+            subs = [((float(slon[j]), float(slat[j])),
+                     (float(slon[j + 1]), float(slat[j + 1]))) for j in range(a, b)]
+            all_edges.append((u, v))
+            if span_flooded:
+                flooded_subsegs.extend(subs)
+            else:
+                dry_edges.append((u, v, subs))
+
+    parent = {}
+
+    def find(x):
+        parent.setdefault(x, x)
+        r = x
+        while parent[r] != r:
+            r = parent[r]
+        while parent[x] != r:
+            parent[x], x = r, parent[x]
+        return r
+
+    def union(a, b):
+        ra, rb = find(a), find(b)
+        if ra != rb:
+            parent[ra] = rb
+
+    parent_all = {}
+
+    def find_a(x):
+        parent_all.setdefault(x, x)
+        r = x
+        while parent_all[r] != r:
+            r = parent_all[r]
+        while parent_all[x] != r:
+            parent_all[x], x = r, parent_all[x]
+        return r
+
+    def union_a(a, b):
+        ra, rb = find_a(a), find_a(b)
+        if ra != rb:
+            parent_all[ra] = rb
+
+    for u, v, _ in dry_edges:
+        union(u, v)
+    for u, v in all_edges:
+        union_a(u, v)
+
+    boundary_nodes = [k for k, (lo, la) in node_xy.items() if is_boundary(lo, la)]
+    used_source = source
+    if source == "boundary" and boundary_nodes:
+        dry_src_roots = set(find(k) for k in boundary_nodes)
+        all_src_roots = set(find_a(k) for k in boundary_nodes)
+    else:
+        used_source = "largest" if source == "boundary" else source
+        comp_size = defaultdict(int)
+        for u, v, _ in dry_edges:
+            comp_size[find(u)] += 1
+        main = max(comp_size, key=comp_size.get) if comp_size else None
+        dry_src_roots = {main} if main is not None else set()
+        all_src_roots = set()
+        if main is not None:
+            for u, v, _ in dry_edges:
+                if find(u) == main:
+                    all_src_roots.add(find_a(u)); break
+
+    segs = []
+    nf = na = ni = npd = 0
+    for s in flooded_subsegs:
+        segs.append((s[0], s[1], 2)); nf += 1
+    for u, v, subs in dry_edges:
+        if find(u) in dry_src_roots:
+            status = 0; na += len(subs)
+        elif find_a(u) in all_src_roots:
+            status = 1; ni += len(subs)
+        else:
+            status = 0; npd += len(subs)        # isolated in raw data; not flood-caused
+        for s in subs:
+            segs.append((s[0], s[1], status))
+
+    tot = nf + na + ni + npd
+    counts = {
+        "flood": nf, "inacc": ni, "dry": na, "predisc": npd, "total": tot,
+        "pct_flood": 100.0 * nf / tot if tot else 0.0,
+        "pct_inacc": 100.0 * ni / tot if tot else 0.0,
+        "pct_dry": 100.0 * (na + npd) / tot if tot else 0.0,
+        "source_used": used_source, "n_boundary_nodes": len(boundary_nodes),
+        # back-compat alias so any caller reading pct_prox still works
+        "prox": ni, "pct_prox": 100.0 * ni / tot if tot else 0.0,
+    }
+    return segs, counts
+
+
 def compose_road_png(basemap_rgb, depth_ft, segments, ext):
     """Basemap + flood-depth overlay + colored road segments -> PNG bytes.
-    Segment colors: green dry, orange proximate (<buffer), red flooded."""
+    Segment colors: green dry/accessible, violet inaccessible (cut off by
+    flooding), red flooded."""
     import io as _io
     from PIL import Image, ImageDraw
     base = Image.fromarray(np.asarray(basemap_rgb, dtype=np.uint8), "RGB").convert("RGBA")
@@ -2361,10 +2570,10 @@ def compose_road_png(basemap_rgb, depth_ft, segments, ext):
         y = (lat_max - lat) / max(lat_max - lat_min, 1e-9) * (H - 1)
         return (x, y)
 
-    colors = {0: (34, 139, 34, 235), 1: (255, 140, 0, 240), 2: (220, 20, 20, 250)}
+    colors = {0: (34, 139, 34, 235), 1: (138, 43, 226, 245), 2: (220, 20, 20, 250)}
     base_w = max(2, int(round(W / 450)))
     widths = {0: base_w, 1: base_w + 1, 2: base_w + 2}
-    for status in (0, 1, 2):                       # dry, then proximate, then flooded on top
+    for status in (0, 1, 2):                       # dry, then inaccessible, then flooded on top
         col = colors[status]
         w = widths[status]
         for p0, p1, s in segments:
@@ -2391,6 +2600,7 @@ fdem = SimpleNamespace(
     fetch_osm_roads=fetch_osm_roads,
     sample_dem_bilinear=sample_dem_bilinear,
     classify_roads=classify_roads,
+    classify_roads_access=classify_roads_access,
     compose_road_png=compose_road_png,
     legend_html=legend_html,
 )
@@ -4590,7 +4800,7 @@ def main():
             '<p class="tab-description">OpenStreetMap roads classified against the same bathtub flood levels '
             'as the Flood Maps tab. Each road is sampled along its length, its ground elevation read from the '
             'terrain, and every segment flagged <b style="color:#dc1414">flooded</b> (surface below the water '
-            'level), <b style="color:#ff8c00">proximate</b> (within the buffer of flooding), or '
+            'level), <b style="color:#8a2be2">inaccessible</b> (dry but cut off from the road network by flooding), or '
             '<b style="color:#228b22">dry</b>.</p>',
             unsafe_allow_html=True,
         )
@@ -4715,11 +4925,15 @@ def main():
                 "Standard": (10.0, 700), "Fine": (5.0, 1000), "Finer": (3.0, 1300),
             }[_rres_label]
             _rbase_label = _rcb.selectbox("Basemap", ["OSM (color)", "Light", "Dark"], index=0, key="rd_base")
-            _rprox = st.slider(
-                "Proximity buffer (m)", min_value=10, max_value=100, value=30, step=5, key="rd_prox",
-                help="Roads within this distance of flooded ground are flagged 'proximate' "
-                     "(Koks et al. 2019; Pregnolato et al. 2017 use ~30 m).",
+            _rsrc_label = st.selectbox(
+                "Define \u201creachable\u201d from", ["Roads leaving the map (boundary)", "Largest connected network"],
+                index=0, key="rd_src",
+                help="A dry road is flagged 'inaccessible' when flooding severs every dry route from it to the "
+                     "outside world. 'Roads leaving the map' treats any road crossing the map edge as an exit to "
+                     "the wider network (best when the map is a sub-area). 'Largest connected network' instead "
+                     "treats the biggest connected road cluster as the mainland.",
             )
+            _rsource = "boundary" if _rsrc_label.startswith("Roads leaving") else "largest"
             st.caption(
                 "A road map is produced for every ticked level × horizon × scenario. Maps render as static "
                 "images. Roads come live from OpenStreetMap (Overpass) for the map area."
@@ -4774,9 +4988,9 @@ def main():
                         'border:1px solid #e2e8f0;border-radius:8px;font-size:1.05rem;">'
                         '<b style="font-size:1.2rem;">Roads</b>&nbsp;&nbsp;'
                         '<span style="color:#dc1414;font-weight:800;">━</span> flooded (surface below the water level)'
-                        '&nbsp;&nbsp;&nbsp;<span style="color:#ff8c00;font-weight:800;">━</span> '
-                        f'proximate (dry but within {int(_rprox)} m of flooding)'
-                        '&nbsp;&nbsp;&nbsp;<span style="color:#228b22;font-weight:800;">━</span> dry'
+                        '&nbsp;&nbsp;&nbsp;<span style="color:#8a2be2;font-weight:800;">━</span> '
+                        'inaccessible (dry but cut off from the network by flooding)'
+                        '&nbsp;&nbsp;&nbsp;<span style="color:#228b22;font-weight:800;">━</span> dry (accessible)'
                         '<br><b style="font-size:1.05rem;">Water</b>&nbsp;&nbsp;'
                         '<span style="background:rgb(198,219,239);">&nbsp;&nbsp;</span>'
                         '<span style="background:rgb(107,174,214);">&nbsp;&nbsp;</span>'
@@ -4798,15 +5012,15 @@ def main():
                             for _lbl, _blv in _rrows:
                                 for _yr in _ryears_sel:
                                     _wl = _blv + _rslr(_scn, _yr)
-                                    _segs, _cnt = fdem.classify_roads(
-                                        _Zm, _ext, _roads, _wl, prox_m=float(_rprox))
+                                    _segs, _cnt = fdem.classify_roads_access(
+                                        _Zm, _ext, _roads, _wl, source=_rsource)
                                     _depth = fdem.bathtub_depth_ft(_Zm, _wl, mask_water=True)
                                     _tgt = _cols[_k % 2]
                                     _tgt.markdown(
                                         f"**{_lbl} — {int(_yr)}**<br>"
                                         f"<span style='font-size:0.95rem;color:#374151'>"
                                         f"WL ≈ {_wl:.2f} ft NAVD88 &nbsp;•&nbsp; "
-                                        f"flooded {_cnt['pct_flood']:.0f}% · proximate {_cnt['pct_prox']:.0f}% · "
+                                        f"flooded {_cnt['pct_flood']:.0f}% · inaccessible {_cnt['pct_inacc']:.0f}% · "
                                         f"dry {_cnt['pct_dry']:.0f}%</span>",
                                         unsafe_allow_html=True,
                                     )
@@ -4815,10 +5029,13 @@ def main():
                                     _k += 1
 
                     st.caption(
-                        f"Road segments: red = flooded (sampled surface below the water level), orange = within "
-                        f"{int(_rprox)} m of flooding, green = dry. Percentages are by segment count. Road "
+                        "Road segments: red = flooded (sampled surface below the water level), "
+                        "violet = dry but inaccessible (every dry route to the map edge is severed by flooding), "
+                        "green = dry and reachable. Percentages are by segment count. Accessibility is computed on "
+                        "the OpenStreetMap network graph (intersections recovered from shared road vertices); "
+                        "roads that were already disconnected in the raw data are not counted as flood-caused. Road "
                         f"elevations and flood shading from USGS 3DEP (~10 m), displayed at ~{_rres_m:.0f} m; "
-                        f"roads from OpenStreetMap. Open water (Z ≤ 0) is excluded from the flood mask."
+                        "roads from OpenStreetMap. Open water (Z ≤ 0) is excluded from the flood mask."
                     )
 
     # ========================================================================
