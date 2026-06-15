@@ -4045,12 +4045,21 @@ def main():
     # brand and drives every tab (including the NSI dataset tab), so it is no
     # longer rendered as a per-page setting. cv_location is initialized here
     # (before the widget) so the sidebar selectbox can bind to it.
-    def _cb_loc():  ss.cv_location = ss.w_location
+    def _cb_loc():
+        ss.cv_location = ss.w_location
+        # Mobile-homes-dominated default follows the location (on for Pamunkey).
+        ss.cv_mobile = (ss.w_location == "Pamunkey")
+
+    def _cb_mobile():
+        ss.cv_mobile = ss.w_mobile
+
     if available_locations:
         if "cv_location" not in ss:
             ss.cv_location = "Pamunkey" if "Pamunkey" in available_locations else available_locations[0]
         if ss.cv_location not in available_locations:
             ss.cv_location = available_locations[0]
+        if "cv_mobile" not in ss:
+            ss.cv_mobile = (ss.cv_location == "Pamunkey")
 
     with st.sidebar:
         if os.path.exists("logo.png"):
@@ -4069,6 +4078,16 @@ def main():
             ss.w_location = ss.cv_location
             st.selectbox("\U0001f4cd Location", available_locations,
                          key="w_location", on_change=_cb_loc)
+            ss.w_mobile = ss.cv_mobile
+            st.checkbox(
+                "\U0001f3e0 Mobile-homes-dominated area", key="w_mobile", on_change=_cb_mobile,
+                help="When on, the adaptation analysis for this area considers only raising "
+                     "(elevating) homes — the realistic retrofit for manufactured/mobile housing — "
+                     "and compares it against the no-mitigation baseline. The Overview, "
+                     "Distributions, and the map's Adaptation-Effectiveness view reflect this; "
+                     "the integrated baseline results are still shown for comparison. Default on "
+                     "for Pamunkey.",
+            )
         active = st.radio(
             "Navigation", options=VIEWS, key="adapt_active_view",
             label_visibility="collapsed",
@@ -4100,6 +4119,18 @@ def main():
 
     # --- Location is committed by the global rail selector above. ---
     selected_location = ss.cv_location
+
+    # Mobile-homes-dominated area: restrict the adaptation comparison to raising
+    # (elevating) homes vs the no-mitigation baseline across the integrated views.
+    mobile_raise_only = bool(ss.get("cv_mobile", False))
+    _RAISE_ONLY_ACTIONS = ('No mitigation', 'Elevate')
+
+    def _restrict_to_raise_only(df):
+        """Keep only the no-mitigation baseline and the Elevate (raise-home)
+        action. Returns df unchanged if it has no 'Action' column."""
+        if df is None or 'Action' not in getattr(df, 'columns', []):
+            return df
+        return df[df['Action'].isin(_RAISE_ONLY_ACTIONS)].copy()
 
     ss.setdefault("cv_occ", "All")
     if ss.cv_occ not in ("All", "Residential", "Non-Residential"):
@@ -5413,6 +5444,15 @@ def main():
             # the tabs.
             if dfe_filter and 'DFE_Status' in df_b_year.columns:
                 df_b_year = df_b_year[df_b_year['DFE_Status'].isin(dfe_filter)]
+
+            # Mobile-homes-dominated area: keep only the raise-home and baseline
+            # rows so the strategy distributions compare elevation vs no mitigation.
+            if mobile_raise_only:
+                df_b_year = _restrict_to_raise_only(df_b_year)
+                st.caption(
+                    "🏠 **Mobile-homes-dominated area:** distributions and effectiveness counts "
+                    "consider only **raising (elevating) homes** vs the no-mitigation baseline."
+                )
             
             if df_b_year.empty:
                 st.warning(f"No per-building data for year {target_year}.")
@@ -5656,7 +5696,13 @@ def main():
                     # to "Residual" rather than getting credited as Elevation
                     # successes).
                     mask_elev_works = np.zeros(n_tot_s, dtype=bool)
-                    if el_p90 is not None and wb_p90 is not None:
+                    if mobile_raise_only:
+                        # No cheap retrofit in scope: an Elevation success is a
+                        # damaged building whose P90 drops to ≤ $1k when raised.
+                        if el_p90 is not None:
+                            el_arr = np.where(np.isnan(el_p90), no_p90, el_p90)
+                            mask_elev_works = any_damage & (el_arr <= thr)
+                    elif el_p90 is not None and wb_p90 is not None:
                         el_arr = np.where(np.isnan(el_p90), no_p90, el_p90)
                         wb_arr = np.where(np.isnan(wb_p90), no_p90, wb_p90)
                         wfpb_to_thr = wb_arr <= thr
@@ -5775,58 +5821,76 @@ def main():
                     # table column) follows the same swap so the labels stay
                     # internally consistent.
                     _use_raiseu_for_fig4 = (location_name == "Pamunkey")
-                    if _use_raiseu_for_fig4:
-                        def _v4(s):
+                    if mobile_raise_only:
+                        # Only raising homes is in scope: a single Elevation chart,
+                        # using the threshold rule (raising brings P90 ≤ $1k).
+                        def _v5(s):
                             nd = s['n_damaged']
-                            return [100.0 * s['n_raiseu'] / nd if nd > 0 else 0]
-                        def _c4(s): return [s['n_raiseu']]
-                        fig4 = _make_paired_bar(
-                            f"Damaged buildings where Raise Utilities eliminates "
+                            return [100.0 * s['n_elev'] / nd if nd > 0 else 0]
+                        def _c5(s): return [s['n_elev']]
+                        fig5 = _make_paired_bar(
+                            f"Damaged buildings where raising the home eliminates "
                             f"upper-tail damage by {target_year}",
-                            _v4, _c4,
-                            x_left='Raise Utilities',
+                            _v5, _c5,
+                            x_left='Elevate',
                             single_group=True,
                         )
-                    else:
-                        def _v4(s):
-                            nd = s['n_damaged']
-                            return [100.0 * s['n_wfpb'] / nd if nd > 0 else 0]
-                        def _c4(s): return [s['n_wfpb']]
-                        fig4 = _make_paired_bar(
-                            f"Damaged buildings where WFP Basement eliminates "
-                            f"upper-tail damage by {target_year}",
-                            _v4, _c4,
-                            x_left='WFP Basement',
-                            single_group=True,
-                        )
-                    
-                    def _v5(s):
-                        nd = s['n_damaged']
-                        return [100.0 * s['n_elev'] / nd if nd > 0 else 0]
-                    def _c5(s): return [s['n_elev']]
-                    fig5 = _make_paired_bar(
-                        f"Damaged buildings where Elevation outperforms "
-                        f"WFP Basement on P90 damage by {target_year}",
-                        _v5, _c5,
-                        x_left='Elevate',
-                        single_group=True,
-                    )
-                    
-                    # When only Above-DFE buildings are selected, Elevate is
-                    # a no-op in the data generator (Elevate damage = baseline
-                    # by construction), so the "Elevation outperforms WFP B"
-                    # chart would be 0 by definition and the corresponding
-                    # column in the summary table would mislead. Hide both.
-                    if only_above_dfe:
-                        col_p4, = st.columns(1)
-                        with col_p4:
-                            st.plotly_chart(fig4, use_container_width=True)
-                    else:
-                        col_p4, col_p5 = st.columns(2)
-                        with col_p4:
-                            st.plotly_chart(fig4, use_container_width=True)
+                        col_p5, = st.columns(1)
                         with col_p5:
                             st.plotly_chart(fig5, use_container_width=True)
+                    else:
+                        if _use_raiseu_for_fig4:
+                            def _v4(s):
+                                nd = s['n_damaged']
+                                return [100.0 * s['n_raiseu'] / nd if nd > 0 else 0]
+                            def _c4(s): return [s['n_raiseu']]
+                            fig4 = _make_paired_bar(
+                                f"Damaged buildings where Raise Utilities eliminates "
+                                f"upper-tail damage by {target_year}",
+                                _v4, _c4,
+                                x_left='Raise Utilities',
+                                single_group=True,
+                            )
+                        else:
+                            def _v4(s):
+                                nd = s['n_damaged']
+                                return [100.0 * s['n_wfpb'] / nd if nd > 0 else 0]
+                            def _c4(s): return [s['n_wfpb']]
+                            fig4 = _make_paired_bar(
+                                f"Damaged buildings where WFP Basement eliminates "
+                                f"upper-tail damage by {target_year}",
+                                _v4, _c4,
+                                x_left='WFP Basement',
+                                single_group=True,
+                            )
+
+                        def _v5(s):
+                            nd = s['n_damaged']
+                            return [100.0 * s['n_elev'] / nd if nd > 0 else 0]
+                        def _c5(s): return [s['n_elev']]
+                        fig5 = _make_paired_bar(
+                            f"Damaged buildings where Elevation outperforms "
+                            f"WFP Basement on P90 damage by {target_year}",
+                            _v5, _c5,
+                            x_left='Elevate',
+                            single_group=True,
+                        )
+
+                        # When only Above-DFE buildings are selected, Elevate is
+                        # a no-op in the data generator (Elevate damage = baseline
+                        # by construction), so the "Elevation outperforms WFP B"
+                        # chart would be 0 by definition and the corresponding
+                        # column in the summary table would mislead. Hide both.
+                        if only_above_dfe:
+                            col_p4, = st.columns(1)
+                            with col_p4:
+                                st.plotly_chart(fig4, use_container_width=True)
+                        else:
+                            col_p4, col_p5 = st.columns(2)
+                            with col_p4:
+                                st.plotly_chart(fig4, use_container_width=True)
+                            with col_p5:
+                                st.plotly_chart(fig5, use_container_width=True)
                     
                     # Per-scenario summary table
                     tbl_rows = []
@@ -5835,6 +5899,18 @@ def main():
                             continue
                         s = valid_stats[slr_key]
                         nd = s['n_damaged']
+                        if mobile_raise_only:
+                            # Only the raise-home column, threshold semantics.
+                            row = {
+                                'SLR Scenario':          s['label'],
+                                'Buildings':             f"{s['n_tot']:,}",
+                                'Damaged (P90 > $0)':    f"{s['n_sev_dmg']:,}  ({100*s['n_sev_dmg']/s['n_tot']:.1f}%)" if s['n_tot'] else "—",
+                                'Damaged (median > $0)': f"{s['n_p50_dmg']:,}  ({100*s['n_p50_dmg']/s['n_tot']:.1f}%)" if s['n_tot'] else "—",
+                                'Raising the home eliminates P90':
+                                    f"{s['n_elev']:,}  ({100*s['n_elev']/nd:.1f}%)" if nd > 0 else "—",
+                            }
+                            tbl_rows.append(row)
+                            continue
                         # Match the table's eliminator column to the strategy
                         # used by fig4 so the figure and the table never tell
                         # different stories.
@@ -5861,7 +5937,16 @@ def main():
                         st.dataframe(pd.DataFrame(tbl_rows),
                                      use_container_width=True, hide_index=True)
                     
-                    if _use_raiseu_for_fig4:
+                    if mobile_raise_only:
+                        st.caption(
+                            "🏠 Mobile-homes-dominated area: only raising (elevating) homes is "
+                            "considered. Per-building counts use the **P90** of cumulative damage as "
+                            "the upper-tail proxy. The **damaged-buildings chart** shows the share of "
+                            "buildings with median and with P90 damage greater than zero. The "
+                            "**Elevation chart** shows, among damaged buildings, the share for which "
+                            "raising the home brings P90 damage to ≤ $1k."
+                        )
+                    elif _use_raiseu_for_fig4:
                         st.caption(
                             "Per-building counts use the **P90** of the per-building cumulative damage as "
                             "the upper-tail proxy (matching the workshop visualization convention). "
@@ -6458,13 +6543,18 @@ def main():
                             col_wfpb = 'WFP B_P90'
                             cheap_retrofit_label = 'WFP Basement'
                         col_elev  = 'Elevate_P90'
-                        
-                        missing = [c for c in (col_nomit, col_wfpb, col_elev)
-                                   if c not in df_map.columns]
+
+                        # Mobile-homes-dominated area: only raising homes is in
+                        # scope, so the cheap-retrofit bucket is dropped and its
+                        # column is not required.
+                        _req_cols = ((col_nomit, col_elev) if mobile_raise_only
+                                     else (col_nomit, col_wfpb, col_elev))
+                        missing = [c for c in _req_cols if c not in df_map.columns]
                         if missing:
+                            _need = ("No mitigation and Elevate" if mobile_raise_only
+                                     else f"No mitigation, {cheap_retrofit_label}, and Elevate")
                             st.warning(
-                                f"This view needs P90 columns for No mitigation, "
-                                f"{cheap_retrofit_label}, and Elevate. "
+                                f"This view needs P90 columns for {_need}. "
                                 f"Missing: {', '.join(missing)}"
                             )
                         else:
@@ -6473,12 +6563,17 @@ def main():
                             # Preserve NaN so missing retrofit values don't silently
                             # count as effective (fillna(0) would do that).
                             no_mit_raw = df_map[col_nomit].values.astype(float)
-                            wfpb_raw   = df_map[col_wfpb].values.astype(float)
                             elev_raw   = df_map[col_elev].values.astype(float)
-                            
+
                             no_mit = np.where(np.isnan(no_mit_raw), 0.0, no_mit_raw)
                             # NaN in a retrofit column ==> "retrofit not applied" ==> baseline
-                            wfpb   = np.where(np.isnan(wfpb_raw), no_mit, wfpb_raw)
+                            if mobile_raise_only:
+                                # Cheap retrofit not in scope: set it equal to baseline so
+                                # its "to threshold" test is always False below.
+                                wfpb = no_mit.copy()
+                            else:
+                                wfpb_raw = df_map[col_wfpb].values.astype(float)
+                                wfpb = np.where(np.isnan(wfpb_raw), no_mit, wfpb_raw)
                             elev   = np.where(np.isnan(elev_raw), no_mit, elev_raw)
                             
                             # --- MAP classifier (threshold rule) ---
@@ -6576,6 +6671,10 @@ def main():
                                 (3, 'Elevation',            '#f97316'),  # orange
                                 (4, 'Residual Damage',      '#dc2626'),  # red
                             ]
+                            # Mobile-homes-dominated area: cheap retrofit is out of
+                            # scope, so drop its (empty) bucket from the legend.
+                            if mobile_raise_only:
+                                cat_specs = [cs for cs in cat_specs if cs[0] != 2]
                             
                             for ci, label, color in cat_specs:
                                 df_c = df_map[df_map['_cat_action'] == ci]
@@ -6926,37 +7025,51 @@ def main():
                             "damage." + cap_note
                         )
                     elif map_view == "Adaptation Effectiveness":
-                        # Caption uses the same per-location action swap as
-                        # the classifier above: for Pamunkey, "Raise Utilities"
-                        # plays the role of "WFP Basement" everywhere else.
-                        if location_name == "Pamunkey":
-                            _cheap_lbl = "Raise Utilities"
-                            _cheap_desc = "raising at-risk utilities"
+                        if mobile_raise_only:
+                            st.caption(
+                                "🏠 **Mobile-homes-dominated area:** only **raising (elevating) homes** "
+                                "is considered. Each building is colored by whether raising it eliminates "
+                                "its upper-tail (P90) cumulative damage under the selected year and SLR "
+                                "scenario: **No Damage** (baseline P90 ≤ $1k — no intervention needed) → "
+                                "**Elevation** (raising the home brings P90 ≤ $1k) → **Residual Damage** "
+                                "(Under-DFE buildings where even raising the home leaves P90 above $1k — "
+                                "the conversation has to move beyond retrofits, to buyout, relocation, or "
+                                "community-scale interventions). Above-DFE buildings not eliminated by "
+                                "raising are not plotted. Non-residential buildings are marked with a "
+                                "black ring. Uncheck the sidebar option to compare all retrofits."
+                            )
                         else:
-                            _cheap_lbl = "WFP Basement"
-                            _cheap_desc = "basement floodproofing"
-                        st.caption(
-                            "Each building is colored by the **cheapest adaptation that "
-                            "eliminates** its upper-tail (P90) cumulative damage under "
-                            "the selected year and SLR scenario. Buckets are checked in "
-                            "priority order: "
-                            "**No Damage** (baseline P90 ≤ $1k — no intervention needed) → "
-                            f"**{_cheap_lbl}** ({_cheap_desc} brings P90 ≤ $1k) → "
-                            f"**Elevation** ({_cheap_lbl} doesn't reach the threshold but "
-                            "elevation does) → "
-                            "**Residual Damage** (Under-DFE buildings where neither "
-                            f"{_cheap_lbl.lower()} nor elevation can bring P90 ≤ $1k — "
-                            "the conversation has to move beyond retrofits, to buyout, "
-                            "relocation, or larger community-scale interventions). "
-                            "Above-DFE buildings whose damage isn't eliminated by the "
-                            f"two retrofits shown ({_cheap_lbl} or elevation) are not "
-                            "plotted on this view — their relevant adaptation options "
-                            "(wet floodproofing the first floor, content-only measures, "
-                            "etc.) aren't represented in the three-bucket pyramid above. "
-                            "Each building appears in exactly one color, and the legend "
-                            "counts partition the buildings shown. Non-residential "
-                            "buildings are marked with a black ring."
-                        )
+                            # Caption uses the same per-location action swap as
+                            # the classifier above: for Pamunkey, "Raise Utilities"
+                            # plays the role of "WFP Basement" everywhere else.
+                            if location_name == "Pamunkey":
+                                _cheap_lbl = "Raise Utilities"
+                                _cheap_desc = "raising at-risk utilities"
+                            else:
+                                _cheap_lbl = "WFP Basement"
+                                _cheap_desc = "basement floodproofing"
+                            st.caption(
+                                "Each building is colored by the **cheapest adaptation that "
+                                "eliminates** its upper-tail (P90) cumulative damage under "
+                                "the selected year and SLR scenario. Buckets are checked in "
+                                "priority order: "
+                                "**No Damage** (baseline P90 ≤ $1k — no intervention needed) → "
+                                f"**{_cheap_lbl}** ({_cheap_desc} brings P90 ≤ $1k) → "
+                                f"**Elevation** ({_cheap_lbl} doesn't reach the threshold but "
+                                "elevation does) → "
+                                "**Residual Damage** (Under-DFE buildings where neither "
+                                f"{_cheap_lbl.lower()} nor elevation can bring P90 ≤ $1k — "
+                                "the conversation has to move beyond retrofits, to buyout, "
+                                "relocation, or larger community-scale interventions). "
+                                "Above-DFE buildings whose damage isn't eliminated by the "
+                                f"two retrofits shown ({_cheap_lbl} or elevation) are not "
+                                "plotted on this view — their relevant adaptation options "
+                                "(wet floodproofing the first floor, content-only measures, "
+                                "etc.) aren't represented in the three-bucket pyramid above. "
+                                "Each building appears in exactly one color, and the legend "
+                                "counts partition the buildings shown. Non-residential "
+                                "buildings are marked with a black ring."
+                            )
                     elif map_view == "Damage Bins":
                         st.caption(
                             "Each building is colored by its No-Mitigation P90 cumulative damage. " +
@@ -7334,6 +7447,14 @@ def main():
             # floodproofing isn't a meaningful community-wide option there).
             _sum_agg = (df_agg[df_agg['Action'] != 'WFP 1st']
                         if selected_location == "Pamunkey" else df_agg)
+            # Mobile-homes-dominated area: compare only raising homes vs baseline.
+            if mobile_raise_only:
+                _sum_agg = _restrict_to_raise_only(_sum_agg)
+                st.caption(
+                    "🏠 **Mobile-homes-dominated area:** only **raising (elevating) homes** is "
+                    "shown as an adaptation option, compared against the no-mitigation baseline. "
+                    "Uncheck the sidebar option to compare all strategies."
+                )
 
             df_current = _sum_agg[
                 (_sum_agg['TargetYear'] == target_year) & 
