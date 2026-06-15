@@ -2345,7 +2345,8 @@ def classify_roads(Zm, ext, roads, wl_ft, prox_m=30.0, sample_m=8.0):
 
 
 def classify_roads_access(Zm, ext, roads, wl_ft, sample_m=8.0,
-                          source="boundary", snap_dp=6, boundary_tol_m=35.0):
+                          source="boundary", snap_dp=6, boundary_tol_m=35.0,
+                          entry_points=None, entrance_reach_m=300.0):
     """Topological road-accessibility classifier (replaces the proximity buffer).
 
     A road is classified by whether you can still REACH it on dry roads, not by
@@ -2378,6 +2379,17 @@ def classify_roads_access(Zm, ext, roads, wl_ft, sample_m=8.0,
     wider world — the most defensible anchor when the map is a sub-area of a
     larger network. 'largest' instead treats the biggest dry component as the
     mainland; used automatically as a fallback if no boundary exits are found.
+
+    entry_points: optional list of (lon, lat) gateways for a designated main
+    entrance that should stay open even when the entrance road itself floods
+    (e.g. a low causeway that is the site's only access and floods first). For
+    each gateway we take the nearest network node, walk the CONTIGUOUS flooded
+    blob outward from it up to entrance_reach_m (network metres) — capturing the
+    flooded entrance and its flooded gateway intersection but not a separate
+    interior flood — reconnect that blob, and treat the gateway as connected to
+    the outside. The entrance road still renders red where flooded; it just no
+    longer severs the whole site. Interior floods that form their own separate
+    blobs keep stranding roads normally, so this never over-rescues.
 
     Returns (segments, counts) where segments is a list of
     ((lon0,lat0),(lon1,lat1),status), drawn at the same ~sample_m resolution as
@@ -2433,6 +2445,7 @@ def classify_roads_access(Zm, ext, roads, wl_ft, sample_m=8.0,
     dry_edges = []          # (u, v, [subsegs])
     all_edges = []          # (u, v) for the baseline (flood-as-passable) graph
     flooded_subsegs = []
+    flooded_uv = []         # (u, v) node keys of flooded spans, for the entrance walk
     node_xy = {}
 
     for rd in roads:
@@ -2467,6 +2480,7 @@ def classify_roads_access(Zm, ext, roads, wl_ft, sample_m=8.0,
             all_edges.append((u, v))
             if span_flooded:
                 flooded_subsegs.extend(subs)
+                flooded_uv.append((u, v))
             else:
                 dry_edges.append((u, v, subs))
 
@@ -2525,6 +2539,42 @@ def classify_roads_access(Zm, ext, roads, wl_ft, sample_m=8.0,
                 if find(u) == main:
                     all_src_roots.add(find_a(u)); break
 
+    # Designated main-entrance exemption. Access can come through the entrance road
+    # and its (often flooded) gateway intersection, so for each gateway we take the
+    # nearest node, walk the contiguous flooded blob outward up to entrance_reach_m
+    # (network metres) — capturing the flooded entrance + flooded gateway but not a
+    # separate interior flood — reconnect that blob, and make the gateway a source.
+    n_entry = 0
+    if entry_points:
+        import heapq
+        cosl = math.cos(math.radians(midlat))
+
+        def _mlen(a, b):
+            return math.hypot((node_xy[a][0] - node_xy[b][0]) * 111320.0 * cosl,
+                              (node_xy[a][1] - node_xy[b][1]) * 111320.0)
+
+        fl_adj = defaultdict(list)
+        for u, v in flooded_uv:
+            L = _mlen(u, v)
+            fl_adj[u].append((v, L)); fl_adj[v].append((u, L))
+        for ep in entry_points:
+            if not node_xy:
+                break
+            G = min(node_xy, key=lambda k: ((node_xy[k][0] - ep[0]) * cosl) ** 2
+                    + (node_xy[k][1] - ep[1]) ** 2)
+            reached = {G: 0.0}; pq = [(0.0, G)]
+            while pq:
+                d, nn = heapq.heappop(pq)
+                if d > reached.get(nn, 1e18):
+                    continue
+                for w, L in fl_adj[nn]:
+                    nd = d + L
+                    if nd <= entrance_reach_m and nd < reached.get(w, 1e18):
+                        reached[w] = nd; heapq.heappush(pq, (nd, w))
+            for nn in reached:
+                union(G, nn); union_a(G, nn)
+            dry_src_roots.add(find(G)); all_src_roots.add(find_a(G)); n_entry += 1
+
     segs = []
     nf = na = ni = npd = 0
     for s in flooded_subsegs:
@@ -2546,10 +2596,92 @@ def classify_roads_access(Zm, ext, roads, wl_ft, sample_m=8.0,
         "pct_inacc": 100.0 * ni / tot if tot else 0.0,
         "pct_dry": 100.0 * (na + npd) / tot if tot else 0.0,
         "source_used": used_source, "n_boundary_nodes": len(boundary_nodes),
+        "n_entry": n_entry,
         # back-compat alias so any caller reading pct_prox still works
         "prox": ni, "pct_prox": 100.0 * ni / tot if tot else 0.0,
     }
     return segs, counts
+
+
+def _entrance_nodes_edges(roads, snap_dp=6):
+    """Flood-agnostic road graph for entrance detection: node_key -> (lon,lat),
+    adjacency, a per-node 'on a main road' flag (from OSM highway class), and
+    node degree. Main roads are the through-classes (primary/secondary/...)."""
+    from collections import defaultdict
+    MAIN = {"motorway", "trunk", "primary", "secondary", "tertiary",
+            "motorway_link", "trunk_link", "primary_link", "secondary_link", "tertiary_link"}
+
+    def nk(lo, la):
+        return (round(lo, snap_dp), round(la, snap_dp))
+
+    adj = defaultdict(set); xy = {}; ismain = defaultdict(bool)
+    for rd in roads:
+        c = np.asarray(rd["coords"], dtype=float)
+        if len(c) < 2:
+            continue
+        is_main = rd.get("highway", "") in MAIN
+        for i in range(len(c) - 1):
+            u = nk(*c[i]); v = nk(*c[i + 1])
+            xy[u] = (float(c[i][0]), float(c[i][1]))
+            xy[v] = (float(c[i + 1][0]), float(c[i + 1][1]))
+            if u != v:
+                adj[u].add(v); adj[v].add(u)
+                if is_main:
+                    ismain[u] = True; ismain[v] = True
+    deg = {n: len(adj[n]) for n in adj}
+    return xy, adj, ismain, deg
+
+
+def detect_main_entrance(roads, ext, site_lonlat, snap_dp=6):
+    """Auto-detect the site's main entrance gateway: the site-side end of the road
+    that leaves the main road toward the building cluster. Returns [(lon, lat)] to
+    pass as entry_points, or [] if it can't be determined. The gateway is the
+    first junction (degree >= 3) reached after leaving the main road on the path
+    toward the site, i.e. where the single entrance corridor meets the local
+    network — placing the exemption at the entrance, not deep inside the site."""
+    from collections import deque
+    xy, adj, ismain, deg = _entrance_nodes_edges(roads, snap_dp)
+    if not xy:
+        return []
+    lon_min, lat_min, lon_max, lat_max = ext
+    cosl = math.cos(math.radians(0.5 * (lat_min + lat_max)))
+
+    def d2(a, b):
+        return ((a[0] - b[0]) * cosl) ** 2 + (a[1] - b[1]) ** 2
+
+    N_site = min(xy, key=lambda n: d2(xy[n], site_lonlat))
+    main_nodes = [n for n in xy if ismain[n]]
+    if not main_nodes:                       # no classed road: fall back to box-edge nodes
+        tol = 35.0 / 111320.0
+        tolx = 35.0 / (111320.0 * max(cosl, 1e-6))
+        main_nodes = [n for n, (lo, la) in xy.items()
+                      if (abs(lo - lon_min) <= tolx or abs(lo - lon_max) <= tolx
+                          or abs(la - lat_min) <= tol or abs(la - lat_max) <= tol)]
+    if not main_nodes:
+        return []
+    pred = {}; seen = set(main_nodes); dq = deque(main_nodes)
+    for m in main_nodes:
+        pred[m] = None
+    while dq:
+        u = dq.popleft()
+        for w in adj[u]:
+            if w not in seen:
+                seen.add(w); pred[w] = u; dq.append(w)
+    if N_site not in seen:
+        return []
+    path = []; x = N_site
+    while x is not None:
+        path.append(x); x = pred[x]
+    path.reverse()                           # main road -> site
+    gateway = None
+    for n in path:
+        if not ismain[n]:
+            if deg.get(n, 0) >= 3:
+                gateway = n; break
+    if gateway is None:
+        cands = [n for n in path if not ismain[n]]
+        gateway = min(cands, key=lambda n: d2(xy[n], site_lonlat)) if cands else N_site
+    return [xy[gateway]]
 
 
 def compose_road_png(basemap_rgb, depth_ft, segments, ext):
@@ -2601,6 +2733,7 @@ fdem = SimpleNamespace(
     sample_dem_bilinear=sample_dem_bilinear,
     classify_roads=classify_roads,
     classify_roads_access=classify_roads_access,
+    detect_main_entrance=detect_main_entrance,
     compose_road_png=compose_road_png,
     legend_html=legend_html,
 )
@@ -4934,6 +5067,14 @@ def main():
                      "treats the biggest connected road cluster as the mainland.",
             )
             _rsource = "boundary" if _rsrc_label.startswith("Roads leaving") else "largest"
+            _rentry_on = st.checkbox(
+                "Keep the main entrance open as a guaranteed gateway", value=True, key="rd_entry",
+                help="The site's main access road off the main road often floods first and would otherwise make "
+                     "the whole area read as inaccessible. With this on, that entrance is treated as a guaranteed "
+                     "gateway: it still shows as flooded, but it no longer cuts the area off — interior roads are "
+                     "still judged on their own flooding. The entrance is auto-detected from the building cluster "
+                     "and shown below the maps so you can verify it.",
+            )
             st.caption(
                 "A road map is produced for every ticked level × horizon × scenario. Maps render as static "
                 "images. Roads come live from OpenStreetMap (Overpass) for the map area."
@@ -5004,6 +5145,29 @@ def main():
                     if _base_img is None:
                         _base_img = np.full((max(2, _Zm.shape[0]), max(2, _Zm.shape[1]), 3), 245, dtype=np.uint8)
 
+                    # Auto-detect the site's main entrance from the building cluster, so a
+                    # flooded entrance doesn't make the whole area read as inaccessible.
+                    _entry = None
+                    if _rentry_on:
+                        try:
+                            _site_lon = float(np.nanmean(_lonA)); _site_lat = float(np.nanmean(_latA))
+                            _entry = fdem.detect_main_entrance(_roads, _ext, (_site_lon, _site_lat))
+                        except Exception:
+                            _entry = None
+                        if _entry:
+                            _elon, _elat = _entry[0]
+                            st.caption(
+                                f"Main entrance treated as a guaranteed gateway near "
+                                f"**{_elat:.5f}, {_elon:.5f}** (auto-detected from the building cluster). "
+                                f"It still shows flooded, but no longer cuts the area off. If this isn't the right "
+                                f"road, untick the option above."
+                            )
+                        else:
+                            st.caption(
+                                "Main-entrance exemption is on, but no single entrance could be auto-detected "
+                                "from the network here, so it has no effect."
+                            )
+
                     with st.spinner("Classifying roads and building maps…"):
                         for _scn in _rscn_sel:
                             st.markdown(f"##### {_rscn_pretty(_scn)}")
@@ -5013,7 +5177,7 @@ def main():
                                 for _yr in _ryears_sel:
                                     _wl = _blv + _rslr(_scn, _yr)
                                     _segs, _cnt = fdem.classify_roads_access(
-                                        _Zm, _ext, _roads, _wl, source=_rsource)
+                                        _Zm, _ext, _roads, _wl, source=_rsource, entry_points=_entry)
                                     _depth = fdem.bathtub_depth_ft(_Zm, _wl, mask_water=True)
                                     _tgt = _cols[_k % 2]
                                     _tgt.markdown(
