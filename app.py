@@ -2632,36 +2632,63 @@ def _entrance_nodes_edges(roads, snap_dp=6):
     return xy, adj, ismain, deg
 
 
-def detect_main_entrance(roads, ext, site_lonlat, snap_dp=6):
+def detect_main_entrance(roads, ext, site_lonlat, snap_dp=6, boundary_tol_m=40.0):
     """Auto-detect the site's main entrance gateway: the site-side end of the road
-    that leaves the main road toward the building cluster. Returns [(lon, lat)] to
-    pass as entry_points, or [] if it can't be determined. The gateway is the
-    first junction (degree >= 3) reached after leaving the main road on the path
-    toward the site, i.e. where the single entrance corridor meets the local
-    network — placing the exemption at the entrance, not deep inside the site."""
+    that connects the building cluster to the OUTSIDE WORLD. Returns [(lon, lat)] to
+    pass as entry_points, or [] if it can't be determined.
+
+    The connection to the outside is anchored on the building cluster's OWN
+    component: a classified main road if one is present in that component, else the
+    component's boundary exits (roads leaving the map). This is deliberately NOT
+    anchored on the global classified main road — at sites like Pamunkey the
+    reservation network is a separate OSM component whose nearest classified road
+    (King William Rd) is ~1 km away and never shares a node, so a main-road anchor
+    would find no path and return nothing. The gateway is the first junction
+    (degree >= 3) reached after leaving the anchor on the path toward the cluster,
+    i.e. where the single entrance corridor meets the local network — placing the
+    exemption at the entrance, not deep inside the site."""
     from collections import deque
     xy, adj, ismain, deg = _entrance_nodes_edges(roads, snap_dp)
     if not xy:
         return []
     lon_min, lat_min, lon_max, lat_max = ext
     cosl = math.cos(math.radians(0.5 * (lat_min + lat_max)))
+    tol = boundary_tol_m / 111320.0
+    tolx = boundary_tol_m / (111320.0 * max(cosl, 1e-6))
 
     def d2(a, b):
         return ((a[0] - b[0]) * cosl) ** 2 + (a[1] - b[1]) ** 2
 
+    def is_boundary(lo, la):
+        return ((abs(lo - lon_min) <= tolx or abs(lo - lon_max) <= tolx)
+                and lat_min - tol <= la <= lat_max + tol) or \
+               ((abs(la - lat_min) <= tol or abs(la - lat_max) <= tol)
+                and lon_min - tolx <= lo <= lon_max + tolx)
+
+    # nearest node to the building centroid, and the component it belongs to
     N_site = min(xy, key=lambda n: d2(xy[n], site_lonlat))
-    main_nodes = [n for n in xy if ismain[n]]
-    if not main_nodes:                       # no classed road: fall back to box-edge nodes
-        tol = 35.0 / 111320.0
-        tolx = 35.0 / (111320.0 * max(cosl, 1e-6))
-        main_nodes = [n for n, (lo, la) in xy.items()
-                      if (abs(lo - lon_min) <= tolx or abs(lo - lon_max) <= tolx
-                          or abs(la - lat_min) <= tol or abs(la - lat_max) <= tol)]
-    if not main_nodes:
+    comp = {N_site}; dq = deque([N_site])
+    while dq:
+        u = dq.popleft()
+        for w in adj[u]:
+            if w not in comp:
+                comp.add(w); dq.append(w)
+
+    # anchors = how THIS component reaches the outside: a main road within the
+    # component if present, else the component's boundary exits.
+    main_in = [n for n in comp if ismain[n]]
+    bexits = [n for n in comp if is_boundary(*xy[n])]
+    anchors = main_in if main_in else bexits
+    if not anchors:                              # component has no outside link
+        anchors = ([n for n in xy if ismain[n]]
+                   or [n for n, (lo, la) in xy.items() if is_boundary(lo, la)])
+    if not anchors:
         return []
-    pred = {}; seen = set(main_nodes); dq = deque(main_nodes)
-    for m in main_nodes:
-        pred[m] = None
+    anchors = set(anchors)
+
+    pred = {}; seen = set(anchors); dq = deque(anchors)
+    for a in anchors:
+        pred[a] = None
     while dq:
         u = dq.popleft()
         for w in adj[u]:
@@ -2672,14 +2699,15 @@ def detect_main_entrance(roads, ext, site_lonlat, snap_dp=6):
     path = []; x = N_site
     while x is not None:
         path.append(x); x = pred[x]
-    path.reverse()                           # main road -> site
+    path.reverse()                               # anchor -> site
     gateway = None
     for n in path:
-        if not ismain[n]:
-            if deg.get(n, 0) >= 3:
-                gateway = n; break
+        if n in anchors:
+            continue
+        if deg.get(n, 0) >= 3:
+            gateway = n; break
     if gateway is None:
-        cands = [n for n in path if not ismain[n]]
+        cands = [n for n in path if n not in anchors]
         gateway = min(cands, key=lambda n: d2(xy[n], site_lonlat)) if cands else N_site
     return [xy[gateway]]
 
@@ -5106,6 +5134,15 @@ def main():
                      "still judged on their own flooding. The entrance is auto-detected from the building cluster "
                      "and shown below the maps so you can verify it.",
             )
+            _rentry_manual = ""
+            if _rentry_on:
+                _rentry_manual = st.text_input(
+                    "Entrance location override — lat, lon (optional)", value="", key="rd_entry_xy",
+                    placeholder="auto-detect (leave blank)",
+                    help="Leave blank to auto-detect the entrance from the building cluster. If the detected "
+                         "point shown below the maps isn't the right road, pin it by pasting the entrance "
+                         "coordinate here in the same 'lat, lon' order shown there (e.g. 37.5554, -76.8361).",
+                )
             st.caption(
                 "A road map is produced for every ticked level × horizon × scenario. Maps render as static "
                 "images. Roads come live from OpenStreetMap (Overpass) for the map area."
@@ -5176,27 +5213,53 @@ def main():
                     if _base_img is None:
                         _base_img = np.full((max(2, _Zm.shape[0]), max(2, _Zm.shape[1]), 3), 245, dtype=np.uint8)
 
-                    # Auto-detect the site's main entrance from the building cluster, so a
-                    # flooded entrance doesn't make the whole area read as inaccessible.
+                    # Entrance gateway: a manual override (lat, lon) wins; otherwise
+                    # auto-detect from the building cluster, so a flooded entrance doesn't
+                    # make the whole area read as inaccessible.
                     _entry = None
+                    _entry_manual = False
                     if _rentry_on:
-                        try:
-                            _site_lon = float(np.nanmean(_lonA)); _site_lat = float(np.nanmean(_latA))
-                            _entry = fdem.detect_main_entrance(_roads, _ext, (_site_lon, _site_lat))
-                        except Exception:
-                            _entry = None
+                        _mtxt = (_rentry_manual or "").strip()
+                        if _mtxt:
+                            try:
+                                _v = [float(x) for x in
+                                      _mtxt.replace(";", " ").replace(",", " ").split()]
+                                if len(_v) >= 2:
+                                    _a, _b = _v[0], _v[1]
+                                    if _a < 0 and _b > 0:        # given as lon, lat
+                                        _elon, _elat = _a, _b
+                                    else:                         # given as lat, lon (as shown)
+                                        _elat, _elon = _a, _b
+                                    # treat the typed point as a "near here" hint and
+                                    # snap it to the actual entrance gateway, so it need
+                                    # not land exactly on a road node.
+                                    try:
+                                        _snap = fdem.detect_main_entrance(_roads, _ext, (_elon, _elat))
+                                    except Exception:
+                                        _snap = None
+                                    _entry = _snap if _snap else [(_elon, _elat)]
+                                    _entry_manual = True
+                            except Exception:
+                                _entry = None
+                        if _entry is None:
+                            try:
+                                _site_lon = float(np.nanmean(_lonA)); _site_lat = float(np.nanmean(_latA))
+                                _entry = fdem.detect_main_entrance(_roads, _ext, (_site_lon, _site_lat))
+                            except Exception:
+                                _entry = None
                         if _entry:
                             _elon, _elat = _entry[0]
+                            _how = "pinned manually" if _entry_manual else "auto-detected from the building cluster"
                             st.caption(
                                 f"Main entrance treated as a guaranteed gateway near "
-                                f"**{_elat:.5f}, {_elon:.5f}** (auto-detected from the building cluster). "
+                                f"**{_elat:.5f}, {_elon:.5f}** ({_how}). "
                                 f"It still shows flooded, but no longer cuts the area off. If this isn't the right "
-                                f"road, untick the option above."
+                                f"road, set the override above or untick the option."
                             )
                         else:
                             st.caption(
                                 "Main-entrance exemption is on, but no single entrance could be auto-detected "
-                                "from the network here, so it has no effect."
+                                "from the network here, so it has no effect. You can pin one with the override above."
                             )
 
                     with st.spinner("Classifying roads and building maps…"):
@@ -5208,7 +5271,8 @@ def main():
                                 for _yr in _ryears_sel:
                                     _wl = _blv + _rslr(_scn, _yr)
                                     _segs, _cnt = fdem.classify_roads_access(
-                                        _Zm, _ext, _roads, _wl, source=_rsource, entry_points=_entry)
+                                        _Zm, _ext, _roads, _wl, source=_rsource,
+                                        entry_points=_entry, entrance_reach_m=450.0)
                                     _depth = fdem.bathtub_depth_ft(_Zm, _wl, mask_water=True)
                                     _tgt = _cols[_k % 2]
                                     _tgt.markdown(
