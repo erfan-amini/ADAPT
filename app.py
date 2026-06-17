@@ -6237,7 +6237,7 @@ def main():
                         "occurrence counts per building. This selector picks which "
                         "statistic of that distribution colors the map. The mean "
                         "(default) is the average count across the 1,000 realizations, "
-                        "rounded up to the next whole year."
+                        "rounded to the nearest whole year."
                     ),
                 )
                 flood_pct_key = {
@@ -7117,16 +7117,16 @@ def main():
                                 dM['occ_show'] = dM['id'].map(occ_lut[flood_pct_key])
                                 if flood_pct_key == 'occ_mean':
                                     # The mean across realizations is fractional;
-                                    # round UP so any non-zero expected flooding
-                                    # counts as at least one occurrence and the
-                                    # bins/labels stay whole-year integers like the
-                                    # percentiles do.
-                                    dM['occ_show'] = np.ceil(dM['occ_show'])
+                                    # round to the nearest whole year (round half
+                                    # up) so the bins/labels stay whole-year
+                                    # integers like the percentiles do. A mean that
+                                    # rounds to 0 (e.g. 0.3) reads as "never floods".
+                                    dM['occ_show'] = np.floor(dM['occ_show'] + 0.5)
                                 # Buildings without an FFE drop out (NaN) rather
                                 # than being miscolored.
                                 dM = dM[dM['occ_show'].notna()].copy()
 
-                                _pct_word = {'occ_mean': 'mean, rounded up',
+                                _pct_word = {'occ_mean': 'mean, rounded',
                                              'occ_P10': '10th-pct',
                                              'occ_P50': 'median',
                                              'occ_P90': '90th-pct'}[flood_pct_key]
