@@ -7071,10 +7071,10 @@ def main():
                                 dM = df_map.copy()
                                 for _c in ('occ_P10', 'occ_P50', 'occ_P90'):
                                     dM[_c] = dM['id'].map(occ_lut[_c])
-                                dM['_occ_show'] = dM['id'].map(occ_lut[flood_pct_key])
+                                dM['occ_show'] = dM['id'].map(occ_lut[flood_pct_key])
                                 # Buildings without an FFE drop out (NaN) rather
                                 # than being miscolored.
-                                dM = dM[dM['_occ_show'].notna()].copy()
+                                dM = dM[dM['occ_show'].notna()].copy()
 
                                 _pct_word = {'occ_P10': '10th-pct',
                                              'occ_P50': 'median',
@@ -7093,7 +7093,7 @@ def main():
                                     _ffe_v = getattr(_r, 'FFE_ft', None)
                                     if pd.notna(_ffe_v):
                                         _h += f"FFE {float(_ffe_v):.2f} ft NAVD88<br>"
-                                    _h += (f"Floods <b>{_r._occ_show:.0f}</b> of {n_years_win} yrs "
+                                    _h += (f"Floods <b>{_r.occ_show:.0f}</b> of {n_years_win} yrs "
                                            f"by {int(target_year)} ({_pct_word} MC)<br>")
                                     _h += (f"<span style='color:#64748b'>MC spread — "
                                            f"P10 {_r.occ_P10:.0f} · P50 {_r.occ_P50:.0f} · "
@@ -7101,8 +7101,8 @@ def main():
                                     _hover.append(_h)
                                 dM['_fhd'] = [[t, int(i)] for t, i in zip(_hover, dM['id'])]
 
-                                _never = dM[dM['_occ_show'] <= 0]
-                                _flood = dM[dM['_occ_show'] > 0].copy()
+                                _never = dM[dM['occ_show'] <= 0]
+                                _flood = dM[dM['occ_show'] > 0].copy()
 
                                 # Green "never floods" layer first (drawn under).
                                 if len(_never) > 0:
@@ -7154,7 +7154,7 @@ def main():
                                             return f"{a} yr" if a == 1 else f"{a} yrs"
                                         return f"{a}\u2013{b} yrs"
 
-                                    vals = _flood['_occ_show'].to_numpy()
+                                    vals = _flood['occ_show'].to_numpy()
                                     _bidx = np.digitize(vals, edges[1:-1], right=False)
                                     _flood['_bin'] = _bidx
                                     for ci in range(n_bins):
@@ -7440,7 +7440,7 @@ def main():
                             st.metric("Buildings Shown", f"{len(df_map):,}")
                     with col2:
                         if map_view == "Flood Occurrences" and _flood_occ_df is not None and len(_flood_occ_df):
-                            _nflood = int((_flood_occ_df['_occ_show'] > 0).sum())
+                            _nflood = int((_flood_occ_df['occ_show'] > 0).sum())
                             _pctw = {'occ_P10': 'P10', 'occ_P50': 'median',
                                      'occ_P90': 'P90'}[flood_pct_key]
                             st.metric(
