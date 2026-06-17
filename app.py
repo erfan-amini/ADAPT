@@ -6525,6 +6525,15 @@ def main():
                             action_name = col.replace('_P50', '')
                             val = row.get(col, 0)
 
+                            # Mobile-homes-dominated area: raising (elevating) the
+                            # home is the only realistic retrofit, so suppress every
+                            # other action (Raise Utilities, WFP Basement, WFP 1st
+                            # Floor, …) from the hover's strategy list. The
+                            # no-mitigation baseline and Elevate stay as the
+                            # reference + the single in-scope mitigation.
+                            if mobile_raise_only and action_name not in _RAISE_ONLY_ACTIONS:
+                                continue
+
                             # Skip retrofits that don't physically apply to this
                             # building. Those rows were dropped in load_bundle's
                             # applicability filter, which means the wide-form
@@ -7133,10 +7142,14 @@ def main():
                                                    for fr in fracs})
                                     edges = sorted(set([0] + cuts + [n_years_win + 1]))
                                     n_bins = len(edges) - 1
-                                    # Sequential "water" palette: light blue (rare)
-                                    # → deep navy (floods almost every year).
-                                    flood_palette = ['#bfdbfe', '#60a5fa', '#3b82f6',
-                                                     '#1d4ed8', '#1e3a8a']
+                                    # Sequential severity ramp: warm yellow (rare)
+                                    # → deep red (floods almost every year). Warm
+                                    # hues keep adjacent bins distinguishable
+                                    # (an all-blue ramp blurs together) while the
+                                    # green "never floods" markers stay clearly
+                                    # separate from the flooded buildings.
+                                    flood_palette = ['#fed976', '#feb24c', '#fd8d3c',
+                                                     '#f03b20', '#bd0026']
                                     if n_bins <= len(flood_palette):
                                         bin_colors = flood_palette[:n_bins]
                                     else:
