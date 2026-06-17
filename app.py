@@ -5195,32 +5195,34 @@ def main():
                 "Standard": (10.0, 700), "Fine": (5.0, 1000), "Finer": (3.0, 1300),
             }[_rres_label]
             _rbase_label = _rcb.selectbox("Basemap", ["OSM (color)", "Light", "Dark"], index=0, key="rd_base")
-            _rsrc_label = st.selectbox(
-                "Define \u201creachable\u201d from", ["Roads leaving the map (boundary)", "Largest connected network"],
-                index=0, key="rd_src",
-                help="A dry road is flagged 'inaccessible' when flooding severs every dry route from it to the "
-                     "outside world. 'Roads leaving the map' treats any road crossing the map edge as an exit to "
-                     "the wider network (best when the map is a sub-area). 'Largest connected network' instead "
-                     "treats the biggest connected road cluster as the mainland.",
+            _raccess_on = st.checkbox(
+                "Define \u201creachable\u201d from the largest connected network",
+                value=True, key="rd_access",
+                help="On (default): a dry road is flagged 'inaccessible' when flooding severs every dry "
+                     "route from it to the largest connected road cluster, which is treated as the "
+                     "mainland. Off: skip the reachability analysis entirely and color roads only as "
+                     "flooded vs dry (no 'inaccessible' category).",
             )
-            _rsource = "boundary" if _rsrc_label.startswith("Roads leaving") else "largest"
-            _rentry_on = st.checkbox(
-                "Keep the main entrance open as a guaranteed gateway", value=True, key="rd_entry",
-                help="The site's main access road off the main road often floods first and would otherwise make "
-                     "the whole area read as inaccessible. With this on, that entrance is treated as a guaranteed "
-                     "gateway: it still shows as flooded, but it no longer cuts the area off — interior roads are "
-                     "still judged on their own flooding. The entrance is auto-detected from the building cluster "
-                     "and shown below the maps so you can verify it.",
-            )
+            _rsource = "largest"
+            _rentry_on = False
             _rentry_manual = ""
-            if _rentry_on:
-                _rentry_manual = st.text_input(
-                    "Entrance location override — lat, lon (optional)", value="", key="rd_entry_xy",
-                    placeholder="auto-detect (leave blank)",
-                    help="Leave blank to auto-detect the entrance from the building cluster. If the detected "
-                         "point shown below the maps isn't the right road, pin it by pasting the entrance "
-                         "coordinate here in the same 'lat, lon' order shown there (e.g. 37.5554, -76.8361).",
+            if _raccess_on:
+                _rentry_on = st.checkbox(
+                    "Keep the main entrance open as a guaranteed gateway", value=True, key="rd_entry",
+                    help="The site's main access road off the main road often floods first and would otherwise make "
+                         "the whole area read as inaccessible. With this on, that entrance is treated as a guaranteed "
+                         "gateway: it still shows as flooded, but it no longer cuts the area off — interior roads are "
+                         "still judged on their own flooding. The entrance is auto-detected from the building cluster "
+                         "and shown below the maps so you can verify it.",
                 )
+                if _rentry_on:
+                    _rentry_manual = st.text_input(
+                        "Entrance location override — lat, lon (optional)", value="", key="rd_entry_xy",
+                        placeholder="auto-detect (leave blank)",
+                        help="Leave blank to auto-detect the entrance from the building cluster. If the detected "
+                             "point shown below the maps isn't the right road, pin it by pasting the entrance "
+                             "coordinate here in the same 'lat, lon' order shown there (e.g. 37.5554, -76.8361).",
+                    )
             st.caption(
                 "A road map is produced for every ticked level × horizon × scenario. Maps render as static "
                 "images. Roads come live from OpenStreetMap (Overpass) for the map area."
@@ -5351,29 +5353,58 @@ def main():
                                     _segs, _cnt = fdem.classify_roads_access(
                                         _Zm, _ext, _roads, _wl, source=_rsource,
                                         entry_points=_entry, entrance_reach_m=450.0)
+                                    if not _raccess_on:
+                                        # Reachability analysis off: color roads as
+                                        # flooded vs dry only, folding any inaccessible
+                                        # segments back into dry/reachable. Flood
+                                        # detection (status 2) is identical either way,
+                                        # so only the inaccessible overlay is dropped.
+                                        _segs = [(p0, p1, 0 if s == 1 else s)
+                                                 for (p0, p1, s) in _segs]
+                                        _cnt = dict(_cnt)
+                                        _cnt['pct_dry'] = _cnt.get('pct_dry', 0.0) + _cnt.get('pct_inacc', 0.0)
+                                        _cnt['pct_inacc'] = 0.0
                                     _depth = fdem.bathtub_depth_ft(_Zm, _wl, mask_water=True)
                                     _tgt = _cols[_k % 2]
+                                    if _raccess_on:
+                                        _metric_line = (
+                                            f"flooded {_cnt['pct_flood']:.0f}% · "
+                                            f"inaccessible {_cnt['pct_inacc']:.0f}% · "
+                                            f"dry {_cnt['pct_dry']:.0f}%")
+                                    else:
+                                        _metric_line = (
+                                            f"flooded {_cnt['pct_flood']:.0f}% · "
+                                            f"dry {_cnt['pct_dry']:.0f}%")
                                     _tgt.markdown(
                                         f"**{_lbl} — {int(_yr)}**<br>"
                                         f"<span style='font-size:0.95rem;color:#374151'>"
                                         f"WL ≈ {_wl:.2f} ft NAVD88 &nbsp;•&nbsp; "
-                                        f"flooded {_cnt['pct_flood']:.0f}% · inaccessible {_cnt['pct_inacc']:.0f}% · "
-                                        f"dry {_cnt['pct_dry']:.0f}%</span>",
+                                        f"{_metric_line}</span>",
                                         unsafe_allow_html=True,
                                     )
                                     _png = fdem.compose_road_png(_base_img, _depth, _segs, _ext)
                                     _tgt.image(_png, use_container_width=True)
                                     _k += 1
 
-                    st.caption(
-                        "Road segments: red = flooded (sampled surface below the water level), "
-                        "violet = dry but inaccessible (every dry route to the map edge is severed by flooding), "
-                        "green = dry and reachable. Percentages are by segment count. Accessibility is computed on "
-                        "the OpenStreetMap network graph (intersections recovered from shared road vertices); "
-                        "roads that were already disconnected in the raw data are not counted as flood-caused. Road "
-                        f"elevations and flood shading from USGS 3DEP (~10 m), displayed at ~{_rres_m:.0f} m; "
-                        "roads from OpenStreetMap. Open water (Z ≤ 0) is excluded from the flood mask."
-                    )
+                    if _raccess_on:
+                        st.caption(
+                            "Road segments: red = flooded (sampled surface below the water level), "
+                            "violet = dry but inaccessible (every dry route to the largest connected network is "
+                            "severed by flooding), green = dry and reachable. Percentages are by segment count. "
+                            "Accessibility is computed on the OpenStreetMap network graph (intersections recovered "
+                            "from shared road vertices); roads that were already disconnected in the raw data are "
+                            "not counted as flood-caused. Road "
+                            f"elevations and flood shading from USGS 3DEP (~10 m), displayed at ~{_rres_m:.0f} m; "
+                            "roads from OpenStreetMap. Open water (Z ≤ 0) is excluded from the flood mask."
+                        )
+                    else:
+                        st.caption(
+                            "Road segments: red = flooded (sampled surface below the water level), "
+                            "green = dry. Reachability analysis is off, so roads are colored by flooding only "
+                            "(no 'inaccessible' category). Percentages are by segment count. Road "
+                            f"elevations and flood shading from USGS 3DEP (~10 m), displayed at ~{_rres_m:.0f} m; "
+                            "roads from OpenStreetMap. Open water (Z ≤ 0) is excluded from the flood mask."
+                        )
 
     # ========================================================================
     # TAB: BUILDING DEPTH — flood depth at one building vs ground / FFE / NAVD88
@@ -6187,30 +6218,33 @@ def main():
                     ),
                 )
 
-            # Flood Occurrences view — choose which percentile of the
+            # Flood Occurrences view — choose which statistic of the
             # per-building MC occurrence-count distribution drives the map
-            # color (low / median / high). Defaults to the median. Always
-            # defined (defaults to P50) so downstream code can reference it
-            # regardless of the active view.
-            flood_pct_key = 'occ_P50'
+            # color (mean / low / median / high). Defaults to the mean
+            # (rounded up). Always defined (defaults to the mean) so
+            # downstream code can reference it regardless of the active view.
+            flood_pct_key = 'occ_mean'
             if map_view == "Flood Occurrences":
                 _fp_label = st.radio(
-                    "Flood-occurrence percentile (across the 1,000 MC water-level realizations)",
-                    options=["P10 (low)", "Median (P50)", "P90 (high)"],
-                    index=1, horizontal=True,
+                    "Flood-occurrence statistic (across the 1,000 MC water-level realizations)",
+                    options=["Mean (average)", "P10 (low)", "Median (P50)", "P90 (high)"],
+                    index=0, horizontal=True,
                     key="flood_occ_pct",
                     help=(
                         "For each building we count, in every MC realization, how many "
                         "times it floods (annual-max water level above its first-floor "
                         "elevation) from 2025 through the selected horizon — giving 1,000 "
                         "occurrence counts per building. This selector picks which "
-                        "percentile of that distribution colors the map."
+                        "statistic of that distribution colors the map. The mean "
+                        "(default) is the average count across the 1,000 realizations, "
+                        "rounded up to the next whole year."
                     ),
                 )
                 flood_pct_key = {
-                    "P10 (low)":     'occ_P10',
-                    "Median (P50)":  'occ_P50',
-                    "P90 (high)":    'occ_P90',
+                    "Mean (average)": 'occ_mean',
+                    "P10 (low)":      'occ_P10',
+                    "Median (P50)":   'occ_P50',
+                    "P90 (high)":     'occ_P90',
                 }[_fp_label]
 
             # Map data filters (kept with the map rather than in the title
@@ -7078,14 +7112,22 @@ def main():
 
                                 # Attach occurrence stats to the shown buildings.
                                 dM = df_map.copy()
-                                for _c in ('occ_P10', 'occ_P50', 'occ_P90'):
+                                for _c in ('occ_mean', 'occ_P10', 'occ_P50', 'occ_P90'):
                                     dM[_c] = dM['id'].map(occ_lut[_c])
                                 dM['occ_show'] = dM['id'].map(occ_lut[flood_pct_key])
+                                if flood_pct_key == 'occ_mean':
+                                    # The mean across realizations is fractional;
+                                    # round UP so any non-zero expected flooding
+                                    # counts as at least one occurrence and the
+                                    # bins/labels stay whole-year integers like the
+                                    # percentiles do.
+                                    dM['occ_show'] = np.ceil(dM['occ_show'])
                                 # Buildings without an FFE drop out (NaN) rather
                                 # than being miscolored.
                                 dM = dM[dM['occ_show'].notna()].copy()
 
-                                _pct_word = {'occ_P10': '10th-pct',
+                                _pct_word = {'occ_mean': 'mean, rounded up',
+                                             'occ_P10': '10th-pct',
                                              'occ_P50': 'median',
                                              'occ_P90': '90th-pct'}[flood_pct_key]
 
@@ -7105,6 +7147,7 @@ def main():
                                     _h += (f"Floods <b>{_r.occ_show:.0f}</b> of {n_years_win} times "
                                            f"by {int(target_year)} ({_pct_word} MC)<br>")
                                     _h += (f"<span style='color:#64748b'>MC spread — "
+                                           f"mean {_r.occ_mean:.1f} · "
                                            f"P10 {_r.occ_P10:.0f} · P50 {_r.occ_P50:.0f} · "
                                            f"P90 {_r.occ_P90:.0f} times</span>")
                                     _hover.append(_h)
@@ -7191,7 +7234,7 @@ def main():
                                         f"water-level realizations. \u201cFlooded\u201d means the simulated "
                                         f"annual-maximum water level exceeds the building's first-floor "
                                         f"elevation. Bins split the window at 10 / 25 / 50 / 75 % of its length; "
-                                        f"buildings that never flood at this percentile are green."
+                                        f"buildings that never flood under the selected statistic are green."
                                     )
 
                                 if df_map['_is_nonres'].any():
@@ -7454,8 +7497,8 @@ def main():
                     with col2:
                         if map_view == "Flood Occurrences" and _flood_occ_df is not None and len(_flood_occ_df):
                             _nflood = int((_flood_occ_df['occ_show'] > 0).sum())
-                            _pctw = {'occ_P10': 'P10', 'occ_P50': 'median',
-                                     'occ_P90': 'P90'}[flood_pct_key]
+                            _pctw = {'occ_mean': 'mean', 'occ_P10': 'P10',
+                                     'occ_P50': 'median', 'occ_P90': 'P90'}[flood_pct_key]
                             st.metric(
                                 f"Buildings flooding \u22651 time by {int(target_year)} ({_pctw} MC)",
                                 f"{_nflood:,}",
