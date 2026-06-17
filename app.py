@@ -3255,6 +3255,84 @@ def prepare_map_data(df_buildings, target_year, scenario):
     return df_base
 
 
+@st.cache_data(show_spinner=False)
+def compute_flood_occurrences(_mc_df, _ffe_by_id, sig):
+    """Per-building flood-occurrence counts from the MC water-level ensemble.
+
+    For each Monte-Carlo realization (one of the up-to-1,000 `MC_*` columns)
+    we count, across every year from the first MC year through the selected
+    horizon, how many years the simulated annual-maximum water level exceeds
+    the building's first-floor elevation (FFE). That yields one occurrence
+    count per MC column per building — up to 1,000 numbers — and we then
+    report percentiles of that distribution (P10 / P25 / P50 / P75 / P90),
+    mirroring the percentile reporting used throughout the tool.
+
+    Parameters
+    ----------
+    _mc_df : DataFrame
+        Raw MC sheet for one SLR scenario: a 'Year' column plus MC_0001..
+        Underscore-prefixed so Streamlit does NOT hash it (it's large).
+    _ffe_by_id : dict[int, float | None]
+        First-floor elevation (ft NAVD88) per building id. Underscore-
+        prefixed for the same reason.
+    sig : tuple
+        (location_name, scenario, horizon_year) — the ONLY hashed argument.
+        It uniquely determines `_mc_df` and `_ffe_by_id`, so the cache key is
+        correct even though the big inputs are skipped. Keep this computed
+        over ALL location buildings (not the occupancy/DFE-filtered subset)
+        so the cache isn't poisoned by a narrower selection.
+
+    Returns
+    -------
+    DataFrame with columns id, occ_P10, occ_P25, occ_P50, occ_P75, occ_P90,
+    occ_mean, n_years, horizon — or None when there's nothing to compute.
+    """
+    location_name, scenario, horizon_year = sig
+    mc_cols = [c for c in _mc_df.columns if c.startswith('MC_')]
+    sub = _mc_df[_mc_df['Year'] <= int(horizon_year)]
+    if sub.empty or not mc_cols:
+        return None
+    M = sub[mc_cols].to_numpy(dtype=float)            # (n_years, n_mc)
+    n_years, n_mc = M.shape
+
+    ids = [int(i) for i, f in _ffe_by_id.items()
+           if f is not None and np.isfinite(f)]
+    if not ids:
+        return None
+    ffe = np.array([float(_ffe_by_id[i]) for i in ids], dtype=float)   # (N,)
+
+    # A building with FFE f floods in (year, realization) iff WL > f. For a
+    # fixed realization column, the occurrence count as a function of FFE is a
+    # step function, so we sort the column's water levels once and resolve all
+    # buildings with a single searchsorted:
+    #     count(WL > f) = n_years - searchsorted(sorted_col, f, side='right')
+    # 'right' makes the comparison strictly greater-than (water above the
+    # first floor), matching the building-depth convention elsewhere.
+    occ = np.empty((len(ids), n_mc), dtype=np.int32)
+    for j in range(n_mc):
+        col_sorted = np.sort(M[:, j])
+        occ[:, j] = n_years - np.searchsorted(col_sorted, ffe, side='right')
+
+    # Nearest-rank (integer) percentiles: the occurrence count is an integer
+    # number of years per realization, so we report an actual realized count
+    # ("in the median realization it floods N years") rather than a linearly
+    # interpolated fraction. Version-robust across numpy's method/interpolation
+    # keyword rename.
+    def _pctile_int(arr, p):
+        try:
+            return np.percentile(arr, p, axis=1, method='nearest')
+        except TypeError:
+            return np.percentile(arr, p, axis=1, interpolation='nearest')
+
+    out = pd.DataFrame({'id': ids})
+    for p in (10, 25, 50, 75, 90):
+        out[f'occ_P{p:02d}'] = _pctile_int(occ, p).astype(int)
+    out['occ_mean'] = occ.mean(axis=1)
+    out['n_years']  = int(n_years)
+    out['horizon']  = int(horizon_year)
+    return out
+
+
 def aggregate_filtered_data(df_buildings, target_year, scenario):
     """Aggregate building-level data to compute community totals."""
     df_filtered = df_buildings[
@@ -4050,10 +4128,10 @@ def main():
 
     # View identifiers (constants so labels live in one place).
     V_FLOOD = "\U0001f30a Flood maps"
-    V_MAP = "\U0001f5fa\ufe0f Damage maps"
+    V_MAP = "\U0001f5fa\ufe0f Dynamic maps"
     V_ROADS = "\U0001f6e3\ufe0f Road maps"
     V_OVERVIEW = "\U0001f4ca Overview"
-    V_DIST = "\U0001f4e6 Distributions"
+    V_DIST = "\U0001f4e6 Damage distributions"
     V_RES = "\U0001f3e0 Residential example"
     V_NONRES = "\U0001f3e2 Non-residential example"
     V_NSI = "\U0001f5c2\ufe0f NSI dataset"
@@ -6051,8 +6129,8 @@ def main():
         st.markdown(
             '<p class="tab-description">Interactive map showing building-level flood risk. '
             'Use the <b>Map View</b> selector to switch between damage intensity, adaptation '
-            'effectiveness, and binned damage maps. Hover any building to compare baseline '
-            'damage with all adaptation strategies.</p>',
+            'effectiveness, binned damage, and per-building <b>flood occurrences</b> (how often '
+            'each home floods through a chosen horizon). Hover any building for details.</p>',
             unsafe_allow_html=True
         )
         
@@ -6080,13 +6158,15 @@ def main():
             with _mv_col:
                 map_view = st.radio(
                     "Map View",
-                    options=["Damage Heatmap", "Damage Bins", "Adaptation Effectiveness"],
+                    options=["Damage Heatmap", "Damage Bins", "Adaptation Effectiveness", "Flood Occurrences"],
                     horizontal=True,
                     key="map_view_selector",
                     help=(
                         "**Damage Heatmap**: continuous color by No-Mitigation P50 cumulative damage. "
                         "**Damage Bins**: discrete bins of upper-tail damage with breakpoints fixed across years. "
-                        "**Adaptation Effectiveness**: classifies each building by which retrofit eliminates upper-tail damage."
+                        "**Adaptation Effectiveness**: classifies each building by which retrofit eliminates upper-tail damage. "
+                        "**Flood Occurrences**: counts how many years each building's first floor floods (MC water level above FFE) "
+                        "from 2025 through the selected horizon, colored by a chosen percentile of the 1,000-realization distribution."
                     ),
                 )
             with _bm_col:
@@ -6106,6 +6186,32 @@ def main():
                         "white background."
                     ),
                 )
+
+            # Flood Occurrences view — choose which percentile of the
+            # per-building MC occurrence-count distribution drives the map
+            # color (low / median / high). Defaults to the median. Always
+            # defined (defaults to P50) so downstream code can reference it
+            # regardless of the active view.
+            flood_pct_key = 'occ_P50'
+            if map_view == "Flood Occurrences":
+                _fp_label = st.radio(
+                    "Flood-occurrence percentile (across the 1,000 MC water-level realizations)",
+                    options=["P10 (low)", "Median (P50)", "P90 (high)"],
+                    index=1, horizontal=True,
+                    key="flood_occ_pct",
+                    help=(
+                        "For each building we count, in every MC realization, how many "
+                        "years it floods (annual-max water level above its first-floor "
+                        "elevation) from 2025 through the selected horizon — giving 1,000 "
+                        "occurrence counts per building. This selector picks which "
+                        "percentile of that distribution colors the map."
+                    ),
+                )
+                flood_pct_key = {
+                    "P10 (low)":     'occ_P10',
+                    "Median (P50)":  'occ_P50',
+                    "P90 (high)":    'occ_P90',
+                }[_fp_label]
 
             # Map data filters (kept with the map rather than in the title
             # settings row). Bound to the same committed keys the pipeline
@@ -6277,7 +6383,12 @@ def main():
                 # P50 silently drops every building with P50 = 0 but
                 # P90 > $1k — the very buildings that drive tail-risk
                 # planning.
-                if map_view == "Damage Heatmap":
+                if map_view == "Flood Occurrences":
+                    # Flood view shows ALL buildings (a building that never
+                    # floods is drawn green, not hidden), so the damage-based
+                    # "$0 damage" hide filter doesn't apply here.
+                    zero_filter_col = None
+                elif map_view == "Damage Heatmap":
                     zero_filter_col = 'No mitigation_P50' if 'No mitigation_P50' in df_map.columns else None
                 else:
                     # Upper-tail view — fall back to P50 only if P90 isn't loaded
@@ -6520,6 +6631,8 @@ def main():
                     
                     fig_map = go.Figure()
                     bin_caption_extra = ""  # for the Damage Bins view
+                    flood_occ_note = ""     # for the Flood Occurrences view
+                    _flood_occ_df = None    # populated by the Flood Occurrences view
                     
                     # =====================================================
                     # VIEW 1 — Damage Heatmap (existing; continuous color)
@@ -6909,6 +7022,175 @@ def main():
                                     showlegend=True, hoverinfo='skip',
                                 ))
                     
+                    # =====================================================
+                    # VIEW 4 — Flood Occurrences (MC exceedance of FFE)
+                    # For each building, count per MC realization how many
+                    # years (2025 → horizon) the annual-maximum water level
+                    # exceeds its first-floor elevation, then color by a
+                    # chosen percentile (P10 / median / P90) of that
+                    # 1,000-wide occurrence-count distribution.
+                    # =====================================================
+                    elif map_view == "Flood Occurrences":
+                        _wl_map = loc_entry.get('water_levels', {}) if loc_entry else {}
+                        _mc_df = _wl_map.get(f'{scenario}_mc')
+                        _attrs_fo = loc_entry.get('bldg_attrs') if loc_entry else None
+                        if _mc_df is None or 'Year' not in getattr(_mc_df, 'columns', []):
+                            _scn_lbl = ('High-End SLR (P90)' if scenario == '90th-percentile'
+                                        else 'Median SLR (P50)')
+                            st.warning(
+                                f"Monte-Carlo water levels for the {_scn_lbl} scenario aren't "
+                                f"available for {location_name}, so the flood-occurrences map "
+                                f"can't be built. Switch the SLR scenario (above the map) to one "
+                                f"that has an MC ensemble for this location."
+                            )
+                        elif _attrs_fo is None or 'FFE_ft' not in _attrs_fo.columns:
+                            st.warning(
+                                "First-floor elevations (FFE) aren't available for this "
+                                "location, so flood occurrences can't be evaluated."
+                            )
+                        else:
+                            # FFE per building computed over the FULL location
+                            # inventory (not the occupancy/DFE-filtered subset),
+                            # so the cached result is keyed correctly by
+                            # (location, scenario, horizon) alone.
+                            _ffe_by_id = {
+                                int(i): (float(f) if pd.notna(f) else None)
+                                for i, f in zip(_attrs_fo['id'], _attrs_fo['FFE_ft'])
+                            }
+                            _occ = compute_flood_occurrences(
+                                _mc_df, _ffe_by_id,
+                                (location_name, scenario, int(target_year)),
+                            )
+                            if _occ is None or _occ.empty:
+                                st.info("No buildings with a first-floor elevation to evaluate.")
+                            else:
+                                n_years_win = int(_occ['n_years'].iloc[0])
+                                occ_lut = _occ.set_index('id')
+
+                                # Attach occurrence stats to the shown buildings.
+                                dM = df_map.copy()
+                                for _c in ('occ_P10', 'occ_P50', 'occ_P90'):
+                                    dM[_c] = dM['id'].map(occ_lut[_c])
+                                dM['_occ_show'] = dM['id'].map(occ_lut[flood_pct_key])
+                                # Buildings without an FFE drop out (NaN) rather
+                                # than being miscolored.
+                                dM = dM[dM['_occ_show'].notna()].copy()
+
+                                _pct_word = {'occ_P10': '10th-pct',
+                                             'occ_P50': 'median',
+                                             'occ_P90': '90th-pct'}[flood_pct_key]
+
+                                # Flood-specific hover (building id rides along in
+                                # customdata[1] so map clicks still resolve).
+                                _hover = []
+                                for _r in dM.itertuples(index=False):
+                                    _addr = getattr(_r, 'address', None)
+                                    if isinstance(_addr, str) and _addr.strip():
+                                        _h = (f"<b>{_addr}</b> "
+                                              f"<span style='color:#94a3b8'>#{int(_r.id)}</span><br>")
+                                    else:
+                                        _h = f"<b>Building #{int(_r.id)}</b><br>"
+                                    _ffe_v = getattr(_r, 'FFE_ft', None)
+                                    if pd.notna(_ffe_v):
+                                        _h += f"FFE {float(_ffe_v):.2f} ft NAVD88<br>"
+                                    _h += (f"Floods <b>{_r._occ_show:.0f}</b> of {n_years_win} yrs "
+                                           f"by {int(target_year)} ({_pct_word} MC)<br>")
+                                    _h += (f"<span style='color:#64748b'>MC spread — "
+                                           f"P10 {_r.occ_P10:.0f} · P50 {_r.occ_P50:.0f} · "
+                                           f"P90 {_r.occ_P90:.0f} yrs</span>")
+                                    _hover.append(_h)
+                                dM['_fhd'] = [[t, int(i)] for t, i in zip(_hover, dM['id'])]
+
+                                _never = dM[dM['_occ_show'] <= 0]
+                                _flood = dM[dM['_occ_show'] > 0].copy()
+
+                                # Green "never floods" layer first (drawn under).
+                                if len(_never) > 0:
+                                    _add_nonres_ring(fig_map, _never, ring_size=13 * _point_scale)
+                                    fig_map.add_trace(go.Scattermapbox(
+                                        lat=_never['latitude'], lon=_never['longitude'],
+                                        mode='markers',
+                                        marker=dict(size=8 * _point_scale, color='#22c55e', opacity=0.85),
+                                        hovertemplate='%{customdata[0]}<extra></extra>',
+                                        customdata=list(_never['_fhd']),
+                                        name=f"Never floods (0 yrs)  ({len(_never)})",
+                                    ))
+
+                                if len(_flood) == 0:
+                                    flood_occ_note = (
+                                        f"No building's first floor floods in any year through "
+                                        f"{int(target_year)} at the {_pct_word} MC level under this "
+                                        f"SLR scenario."
+                                    )
+                                else:
+                                    # Horizon-robust bins: split the 1..n_years
+                                    # window at 10/25/50/75 % of years, expressed
+                                    # back in absolute year counts. Bins recompute
+                                    # with the horizon (window length) but read the
+                                    # same way at every horizon.
+                                    fracs = [0.10, 0.25, 0.50, 0.75]
+                                    cuts = sorted({max(1, int(math.ceil(n_years_win * fr)))
+                                                   for fr in fracs})
+                                    edges = sorted(set([0] + cuts + [n_years_win + 1]))
+                                    n_bins = len(edges) - 1
+                                    # Sequential "water" palette: light blue (rare)
+                                    # → deep navy (floods almost every year).
+                                    flood_palette = ['#bfdbfe', '#60a5fa', '#3b82f6',
+                                                     '#1d4ed8', '#1e3a8a']
+                                    if n_bins <= len(flood_palette):
+                                        bin_colors = flood_palette[:n_bins]
+                                    else:
+                                        bin_colors = (flood_palette +
+                                                      [flood_palette[-1]] * (n_bins - len(flood_palette)))
+
+                                    def _occ_bin_label(ci):
+                                        # bin ci covers counts in [a, b]; bin 0's
+                                        # zero is already split out as "never".
+                                        a = max(edges[ci], 1) if ci == 0 else edges[ci]
+                                        b = edges[ci + 1] - 1
+                                        if b >= n_years_win:
+                                            b = n_years_win
+                                        if a >= b:
+                                            return f"{a} yr" if a == 1 else f"{a} yrs"
+                                        return f"{a}\u2013{b} yrs"
+
+                                    vals = _flood['_occ_show'].to_numpy()
+                                    _bidx = np.digitize(vals, edges[1:-1], right=False)
+                                    _flood['_bin'] = _bidx
+                                    for ci in range(n_bins):
+                                        dfc = _flood[_flood['_bin'] == ci]
+                                        if len(dfc) == 0:
+                                            continue
+                                        _add_nonres_ring(fig_map, dfc, ring_size=13 * _point_scale)
+                                        fig_map.add_trace(go.Scattermapbox(
+                                            lat=dfc['latitude'], lon=dfc['longitude'],
+                                            mode='markers',
+                                            marker=dict(size=8 * _point_scale,
+                                                        color=bin_colors[ci], opacity=0.92),
+                                            hovertemplate='%{customdata[0]}<extra></extra>',
+                                            customdata=list(dfc['_fhd']),
+                                            name=f"{_occ_bin_label(ci)}  ({len(dfc)})",
+                                        ))
+                                    flood_occ_note = (
+                                        f"Each building is colored by the **{_pct_word}** number of years "
+                                        f"its first floor floods between 2025 and {int(target_year)} "
+                                        f"(a {n_years_win}-year window), taken across the 1,000 MC "
+                                        f"water-level realizations. \u201cFlooded\u201d means the simulated "
+                                        f"annual-maximum water level exceeds the building's first-floor "
+                                        f"elevation. Bins split the window at 10 / 25 / 50 / 75 % of years; "
+                                        f"buildings that never flood at this percentile are green."
+                                    )
+
+                                if df_map['_is_nonres'].any():
+                                    fig_map.add_trace(go.Scattermapbox(
+                                        lat=[None], lon=[None],
+                                        mode='markers',
+                                        marker=dict(size=10 * _point_scale, color='black', opacity=0.85),
+                                        name='Non-Residential (ringed)',
+                                        showlegend=True, hoverinfo='skip',
+                                    ))
+                                _flood_occ_df = dM   # for the metrics/caption below
+
                     # ---- Search highlight (auto-expires) ----
                     # If the user just searched for a Building ID and the
                     # highlight is still fresh, drop a magenta ring on top
@@ -7140,14 +7422,34 @@ def main():
                             bin_caption_extra +
                             " Non-residential buildings are marked with a black ring."
                         )
+                    elif map_view == "Flood Occurrences":
+                        if flood_occ_note:
+                            st.caption(
+                                flood_occ_note +
+                                " Non-residential buildings are marked with a black ring. "
+                                "Switch the SLR scenario or horizon (year) above to update, and use "
+                                "the percentile selector to read the low / median / high MC outcome."
+                            )
                     
                     col1, col2 = st.columns(2)
                     
                     with col1:
-                        st.metric("Buildings Shown", f"{len(df_map):,}")
+                        if map_view == "Flood Occurrences" and _flood_occ_df is not None:
+                            st.metric("Buildings Evaluated", f"{len(_flood_occ_df):,}")
+                        else:
+                            st.metric("Buildings Shown", f"{len(df_map):,}")
                     with col2:
-                        total_baseline = df_map[baseline_col].sum() if baseline_col else 0
-                        st.metric("Total No Mitigation Cumulative Damage", format_currency(total_baseline))
+                        if map_view == "Flood Occurrences" and _flood_occ_df is not None and len(_flood_occ_df):
+                            _nflood = int((_flood_occ_df['_occ_show'] > 0).sum())
+                            _pctw = {'occ_P10': 'P10', 'occ_P50': 'median',
+                                     'occ_P90': 'P90'}[flood_pct_key]
+                            st.metric(
+                                f"Buildings flooding \u22651 yr by {int(target_year)} ({_pctw} MC)",
+                                f"{_nflood:,}",
+                            )
+                        else:
+                            total_baseline = df_map[baseline_col].sum() if baseline_col else 0
+                            st.metric("Total No Mitigation Cumulative Damage", format_currency(total_baseline))
                     
                     # ========================================================
                     # HIGH-RESOLUTION MAP EXPORT
