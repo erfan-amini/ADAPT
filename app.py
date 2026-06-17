@@ -6165,7 +6165,7 @@ def main():
                         "**Damage Heatmap**: continuous color by No-Mitigation P50 cumulative damage. "
                         "**Damage Bins**: discrete bins of upper-tail damage with breakpoints fixed across years. "
                         "**Adaptation Effectiveness**: classifies each building by which retrofit eliminates upper-tail damage. "
-                        "**Flood Occurrences**: counts how many years each building's first floor floods (MC water level above FFE) "
+                        "**Flood Occurrences**: counts how many times each building's first floor floods (MC water level above FFE) "
                         "from 2025 through the selected horizon, colored by a chosen percentile of the 1,000-realization distribution."
                     ),
                 )
@@ -6201,7 +6201,7 @@ def main():
                     key="flood_occ_pct",
                     help=(
                         "For each building we count, in every MC realization, how many "
-                        "years it floods (annual-max water level above its first-floor "
+                        "times it floods (annual-max water level above its first-floor "
                         "elevation) from 2025 through the selected horizon — giving 1,000 "
                         "occurrence counts per building. This selector picks which "
                         "percentile of that distribution colors the map."
@@ -7093,11 +7093,11 @@ def main():
                                     _ffe_v = getattr(_r, 'FFE_ft', None)
                                     if pd.notna(_ffe_v):
                                         _h += f"FFE {float(_ffe_v):.2f} ft NAVD88<br>"
-                                    _h += (f"Floods <b>{_r.occ_show:.0f}</b> of {n_years_win} yrs "
+                                    _h += (f"Floods <b>{_r.occ_show:.0f}</b> of {n_years_win} times "
                                            f"by {int(target_year)} ({_pct_word} MC)<br>")
                                     _h += (f"<span style='color:#64748b'>MC spread — "
                                            f"P10 {_r.occ_P10:.0f} · P50 {_r.occ_P50:.0f} · "
-                                           f"P90 {_r.occ_P90:.0f} yrs</span>")
+                                           f"P90 {_r.occ_P90:.0f} times</span>")
                                     _hover.append(_h)
                                 dM['_fhd'] = [[t, int(i)] for t, i in zip(_hover, dM['id'])]
 
@@ -7113,7 +7113,7 @@ def main():
                                         marker=dict(size=8 * _point_scale, color='#22c55e', opacity=0.85),
                                         hovertemplate='%{customdata[0]}<extra></extra>',
                                         customdata=list(_never['_fhd']),
-                                        name=f"Never floods (0 yrs)  ({len(_never)})",
+                                        name=f"Never floods (0 times)  ({len(_never)})",
                                     ))
 
                                 if len(_flood) == 0:
@@ -7151,8 +7151,8 @@ def main():
                                         if b >= n_years_win:
                                             b = n_years_win
                                         if a >= b:
-                                            return f"{a} yr" if a == 1 else f"{a} yrs"
-                                        return f"{a}\u2013{b} yrs"
+                                            return f"{a} time" if a == 1 else f"{a} times"
+                                        return f"{a}\u2013{b} times"
 
                                     vals = _flood['occ_show'].to_numpy()
                                     _bidx = np.digitize(vals, edges[1:-1], right=False)
@@ -7172,12 +7172,12 @@ def main():
                                             name=f"{_occ_bin_label(ci)}  ({len(dfc)})",
                                         ))
                                     flood_occ_note = (
-                                        f"Each building is colored by the **{_pct_word}** number of years "
+                                        f"Each building is colored by the **{_pct_word}** number of times "
                                         f"its first floor floods between 2025 and {int(target_year)} "
                                         f"(a {n_years_win}-year window), taken across the 1,000 MC "
                                         f"water-level realizations. \u201cFlooded\u201d means the simulated "
                                         f"annual-maximum water level exceeds the building's first-floor "
-                                        f"elevation. Bins split the window at 10 / 25 / 50 / 75 % of years; "
+                                        f"elevation. Bins split the window at 10 / 25 / 50 / 75 % of its length; "
                                         f"buildings that never flood at this percentile are green."
                                     )
 
@@ -7444,7 +7444,7 @@ def main():
                             _pctw = {'occ_P10': 'P10', 'occ_P50': 'median',
                                      'occ_P90': 'P90'}[flood_pct_key]
                             st.metric(
-                                f"Buildings flooding \u22651 yr by {int(target_year)} ({_pctw} MC)",
+                                f"Buildings flooding \u22651 time by {int(target_year)} ({_pctw} MC)",
                                 f"{_nflood:,}",
                             )
                         else:
