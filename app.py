@@ -8469,7 +8469,7 @@ def main():
                     _nb = max(len(labels) - 1, 1)
                     bar_colors = [_hex_lerp('c7d2fe', '3730a3', i / _nb)
                                   for i in range(len(labels))]
-                    _med = float(_vals.median())
+                    _avg = float(_vals.mean())
                     _ymax = max(int(counts.max()), 1)
 
                     fig_sv = go.Figure()
@@ -8486,7 +8486,7 @@ def main():
                     fig_sv.update_layout(
                         title=dict(
                             text=(f"{_sv_occ}  ·  {len(_vals):,} buildings  ·  "
-                                  f"median {_fmt_money_k(_med)}"),
+                                  f"average {_fmt_money_k(_avg)}"),
                             x=0.01, xanchor='left',
                             font=dict(size=15, color='#0f172a')),
                         height=430, plot_bgcolor='white', paper_bgcolor='white',
@@ -8508,7 +8508,7 @@ def main():
                                     theme=None, key="ov_sv_chart")
                     st.caption(
                         f"Inventory for **{location_name}** · category **{_sv_occ}** · "
-                        f"n = {len(_vals):,} · median {_fmt_money_k(_med)} · "
+                        f"n = {len(_vals):,} · average {_fmt_money_k(_avg)} · "
                         f"range {_fmt_money_k(vmin)}–{_fmt_money_k(vmax)} · "
                         f"band width {_fmt_money_k(width)}. Structure values are "
                         "replacement-cost estimates from the building inventory."
