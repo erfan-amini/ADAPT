@@ -6764,15 +6764,18 @@ def main():
                             cheap_retrofit_label = 'WFP Basement'
                         col_elev  = 'Elevate_P90'
 
-                        # Mobile-homes-dominated area: only raising homes is in
-                        # scope, so the cheap-retrofit bucket is dropped and its
-                        # column is not required.
-                        _req_cols = ((col_nomit, col_elev) if mobile_raise_only
-                                     else (col_nomit, col_wfpb, col_elev))
+                        # The Adaptation Effectiveness map always shows the cheap
+                        # retrofit (yellow) bucket — Raise Utilities at Pamunkey —
+                        # even in mobile-homes-dominated areas. A building whose P90
+                        # damage drops to ≤ the $1k "zero" threshold after raising
+                        # utilities reads yellow rather than being dropped to
+                        # Elevation/Residual. (The hover strategy list and the
+                        # effectiveness COUNTS still honor the mobile-home toggle;
+                        # this override is local to the map's category coloring.)
+                        _req_cols = (col_nomit, col_wfpb, col_elev)
                         missing = [c for c in _req_cols if c not in df_map.columns]
                         if missing:
-                            _need = ("No mitigation and Elevate" if mobile_raise_only
-                                     else f"No mitigation, {cheap_retrofit_label}, and Elevate")
+                            _need = f"No mitigation, {cheap_retrofit_label}, and Elevate"
                             st.warning(
                                 f"This view needs P90 columns for {_need}. "
                                 f"Missing: {', '.join(missing)}"
@@ -6787,13 +6790,8 @@ def main():
 
                             no_mit = np.where(np.isnan(no_mit_raw), 0.0, no_mit_raw)
                             # NaN in a retrofit column ==> "retrofit not applied" ==> baseline
-                            if mobile_raise_only:
-                                # Cheap retrofit not in scope: set it equal to baseline so
-                                # its "to threshold" test is always False below.
-                                wfpb = no_mit.copy()
-                            else:
-                                wfpb_raw = df_map[col_wfpb].values.astype(float)
-                                wfpb = np.where(np.isnan(wfpb_raw), no_mit, wfpb_raw)
+                            wfpb_raw = df_map[col_wfpb].values.astype(float)
+                            wfpb = np.where(np.isnan(wfpb_raw), no_mit, wfpb_raw)
                             elev   = np.where(np.isnan(elev_raw), no_mit, elev_raw)
                             
                             # --- MAP classifier (threshold rule) ---
@@ -6891,10 +6889,6 @@ def main():
                                 (3, 'Elevation',            '#f97316'),  # orange
                                 (4, 'Residual Damage',      '#dc2626'),  # red
                             ]
-                            # Mobile-homes-dominated area: cheap retrofit is out of
-                            # scope, so drop its (empty) bucket from the legend.
-                            if mobile_raise_only:
-                                cat_specs = [cs for cs in cat_specs if cs[0] != 2]
                             
                             for ci, label, color in cat_specs:
                                 df_c = df_map[df_map['_cat_action'] == ci]
@@ -6915,7 +6909,6 @@ def main():
                                         showlegend=True, hoverinfo='skip',
                                     ))
                                     continue
-                                _add_nonres_ring(fig_map, df_c, ring_size=13 * _point_scale)
                                 fig_map.add_trace(go.Scattermapbox(
                                     lat=df_c['latitude'], lon=df_c['longitude'],
                                     mode='markers',
@@ -6924,17 +6917,7 @@ def main():
                                     customdata=list(df_c['hover_data']),
                                     name=f"{label} ({legend_count})",
                                 ))
-                            
-                            # Add a legend-only trace for the non-residential ring marker
-                            if df_map['_is_nonres'].any():
-                                fig_map.add_trace(go.Scattermapbox(
-                                    lat=[None], lon=[None],
-                                    mode='markers',
-                                    marker=dict(size=10 * _point_scale, color='black', opacity=0.85),
-                                    name='Non-Residential (ringed)',
-                                    showlegend=True, hoverinfo='skip',
-                                ))
-                    
+
                     # =====================================================
                     # VIEW 3 — Damage Bins (5 categories with dynamic breaks)
                     # Ported from generate_damage_animation_v3.m
