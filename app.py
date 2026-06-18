@@ -9523,9 +9523,13 @@ def main():
             # tool doesn't know the slug, it falls back to its own default.
             _slug = _re.sub(r'[^a-z0-9]', '', str(selected_location).lower())
             _inject = '<script>window.__ADAPT_LOCATION = "%s";</script>\n' % _slug
-            nsi_html_loc = nsi_html.replace(
-                '<script type="text/babel">',
-                _inject + '<script type="text/babel">', 1)
+            # Anchor on the tag PREFIX (no trailing '>') so the injection still
+            # lands ahead of the app's script even though the babel tag now
+            # carries attributes (type="text/babel" data-presets="react"). The
+            # injected plain <script> runs before Babel transpiles the app, so
+            # window.__ADAPT_LOCATION is set in time for the tool to read it.
+            _anchor = '<script type="text/babel"'
+            nsi_html_loc = nsi_html.replace(_anchor, _inject + _anchor, 1)
             # The height arg is a fallback/min; the CSS above stretches the
             # iframe to fill the viewport. The app's flex column splits that
             # height into the top toolbar + the map/right-panel row.
