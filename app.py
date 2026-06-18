@@ -4807,8 +4807,14 @@ def main():
                 yaxis_title="Damage (% of value)", height=390,
                 margin=dict(l=10, r=10, t=44, b=10),
                 legend=dict(orientation="h", y=-0.32, font=dict(size=10)),
+                plot_bgcolor='white',
+                xaxis=dict(showgrid=True, gridcolor='#e5e7eb', gridwidth=1, zeroline=False),
+                yaxis=dict(showgrid=True, gridcolor='#e5e7eb', gridwidth=1, zeroline=False),
             )
-            st.plotly_chart(fig, use_container_width=True, key=f"{ctx}_{title}")
+            # theme=None so the explicit white background + gridlines above are
+            # honored; Streamlit's default plotly theme otherwise overrides the
+            # axis grid settings and the vertical gridlines disappear.
+            st.plotly_chart(fig, use_container_width=True, theme=None, key=f"{ctx}_{title}")
 
         p1, p2 = st.columns(2)
         with p1:
