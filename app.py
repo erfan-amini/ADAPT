@@ -6678,20 +6678,43 @@ def main():
                     # Defaults to 2× for Pamunkey, 1× for other locations.
 
                     # =====================================================
-                    # Helper: add a non-residential "ring" trace beneath
-                    # any colored category trace
+                    # Helper: ring a small set of specific "buildings of
+                    # interest" beneath any colored category trace. Only the
+                    # IDs in _HIGHLIGHT_RING_IDS are ringed, and only for
+                    # Pamunkey — every other building (residential or not) is
+                    # left unringed. (Replaces the old non-residential ring.)
                     # =====================================================
-                    def _add_nonres_ring(fig, df_subset, ring_size=13):
-                        nr = df_subset[df_subset['_is_nonres']]
-                        if len(nr) > 0:
+                    _HIGHLIGHT_RING_IDS = {10001, 10000013, 10002, 579513008}
+
+                    def _add_highlight_ring(fig, df_subset, ring_size=13):
+                        if location_name != "Pamunkey" or len(df_subset) == 0:
+                            return
+                        _ids = pd.to_numeric(df_subset['id'], errors='coerce')
+                        hl = df_subset[_ids.isin(_HIGHLIGHT_RING_IDS)]
+                        if len(hl) > 0:
                             fig.add_trace(go.Scattermapbox(
-                                lat=nr['latitude'], lon=nr['longitude'],
+                                lat=hl['latitude'], lon=hl['longitude'],
                                 mode='markers',
                                 marker=dict(size=ring_size, color='black', opacity=0.85),
                                 hoverinfo='skip',
                                 showlegend=False,
-                                name='_nonres_ring',
+                                name='_highlight_ring',
                             ))
+
+                    def _add_highlight_ring_legend(fig):
+                        """Legend-only stub explaining the black ring. Shown only
+                        when Pamunkey actually has ringed buildings on screen."""
+                        if location_name != "Pamunkey":
+                            return
+                        if not pd.to_numeric(df_map['id'], errors='coerce').isin(
+                                _HIGHLIGHT_RING_IDS).any():
+                            return
+                        fig.add_trace(go.Scattermapbox(
+                            lat=[None], lon=[None], mode='markers',
+                            marker=dict(size=10 * _point_scale, color='black', opacity=0.85),
+                            name='Buildings of interest (ringed)',
+                            showlegend=True, hoverinfo='skip',
+                        ))
                     
                     fig_map = go.Figure()
                     bin_caption_extra = ""  # for the Damage Bins view
@@ -6947,6 +6970,7 @@ def main():
                                         showlegend=True, hoverinfo='skip',
                                     ))
                                     continue
+                                _add_highlight_ring(fig_map, df_c, ring_size=13 * _point_scale)
                                 fig_map.add_trace(go.Scattermapbox(
                                     lat=df_c['latitude'], lon=df_c['longitude'],
                                     mode='markers',
@@ -6955,6 +6979,7 @@ def main():
                                     customdata=list(df_c['hover_data']),
                                     name=f"{label} ({legend_count})",
                                 ))
+                            _add_highlight_ring_legend(fig_map)
 
                     # =====================================================
                     # VIEW 3 — Damage Bins (5 categories with dynamic breaks)
@@ -6981,7 +7006,7 @@ def main():
                             # ---- Plot the green "No Damage" layer first, so the
                             # damaged-building markers draw on top of it. ----
                             if n_no_dmg > 0:
-                                _add_nonres_ring(fig_map, df_no_dmg, ring_size=13 * _point_scale)
+                                _add_highlight_ring(fig_map, df_no_dmg, ring_size=13 * _point_scale)
                                 fig_map.add_trace(go.Scattermapbox(
                                     lat=df_no_dmg['latitude'], lon=df_no_dmg['longitude'],
                                     mode='markers',
@@ -7057,7 +7082,7 @@ def main():
                                     if len(df_c) == 0:
                                         continue
                                     count = len(df_c)
-                                    _add_nonres_ring(fig_map, df_c, ring_size=13 * _point_scale)
+                                    _add_highlight_ring(fig_map, df_c, ring_size=13 * _point_scale)
                                     fig_map.add_trace(go.Scattermapbox(
                                         lat=df_c['latitude'], lon=df_c['longitude'],
                                         mode='markers',
@@ -7077,14 +7102,7 @@ def main():
                                     "you switch SLR scenario. Buildings with no damage (≤ $1k) are shown in green."
                                 )
                             
-                            if df_map['_is_nonres'].any():
-                                fig_map.add_trace(go.Scattermapbox(
-                                    lat=[None], lon=[None],
-                                    mode='markers',
-                                    marker=dict(size=10 * _point_scale, color='black', opacity=0.85),
-                                    name='Non-Residential (ringed)',
-                                    showlegend=True, hoverinfo='skip',
-                                ))
+                            _add_highlight_ring_legend(fig_map)
                     
                     # =====================================================
                     # VIEW 4 — Flood Occurrences (MC exceedance of FFE)
@@ -7179,7 +7197,7 @@ def main():
 
                                 # Green "never floods" layer first (drawn under).
                                 if len(_never) > 0:
-                                    _add_nonres_ring(fig_map, _never, ring_size=13 * _point_scale)
+                                    _add_highlight_ring(fig_map, _never, ring_size=13 * _point_scale)
                                     fig_map.add_trace(go.Scattermapbox(
                                         lat=_never['latitude'], lon=_never['longitude'],
                                         mode='markers',
@@ -7238,7 +7256,7 @@ def main():
                                         dfc = _flood[_flood['_bin'] == ci]
                                         if len(dfc) == 0:
                                             continue
-                                        _add_nonres_ring(fig_map, dfc, ring_size=13 * _point_scale)
+                                        _add_highlight_ring(fig_map, dfc, ring_size=13 * _point_scale)
                                         fig_map.add_trace(go.Scattermapbox(
                                             lat=dfc['latitude'], lon=dfc['longitude'],
                                             mode='markers',
@@ -7258,14 +7276,7 @@ def main():
                                         f"buildings that never flood under the selected statistic are green."
                                     )
 
-                                if df_map['_is_nonres'].any():
-                                    fig_map.add_trace(go.Scattermapbox(
-                                        lat=[None], lon=[None],
-                                        mode='markers',
-                                        marker=dict(size=10 * _point_scale, color='black', opacity=0.85),
-                                        name='Non-Residential (ringed)',
-                                        showlegend=True, hoverinfo='skip',
-                                    ))
+                                _add_highlight_ring_legend(fig_map)
                                 _flood_occ_df = dM   # for the metrics/caption below
 
                     # ---- Search highlight (auto-expires) ----
