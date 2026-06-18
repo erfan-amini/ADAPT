@@ -2943,6 +2943,19 @@ def load_bundle(data_folder, location_slug):
     _keep &= ~((_action == 'WFP B')   & ~_is_basement)
     _keep &= ~((_action == 'Elevate') &  _is_above_dfe)
 
+    # Manufactured housing (RES2) sits on piers: no basement, no conditioned
+    # upper floor to relocate utilities to, and no separable 1st-floor
+    # envelope to dry/wet-floodproof. The only physically meaningful retrofit
+    # is raising (elevating) the whole home, so drop Raise Utilities, WFP
+    # Basement, and WFP 1st Floor for RES2 buildings. This makes those actions
+    # vanish from the hover, the map (including the Adaptation-Effectiveness
+    # yellow "cheap retrofit" bucket), the distributions, and every aggregate
+    # — a RES2 home can only ever be classified under Elevate.
+    if 'occupancy_type' in df_buildings.columns:
+        _is_res2 = (df_buildings['occupancy_type']
+                    .fillna('').astype(str).str.upper().str.startswith('RES2'))
+        _keep &= ~(_is_res2 & _action.isin(['Raise Utilities', 'WFP B', 'WFP 1st']))
+
     # Manufactured-housing-dominant inventory (e.g., Pamunkey): if basements
     # are essentially absent, drop Wet-Floodproof-Basement for the whole
     # location so it never surfaces as an option anywhere.
@@ -6555,17 +6568,25 @@ def main():
                         else:
                             _no_mit_shown_inline = False
 
+                        # Mobile/manufactured homes (RES2) have only one realistic
+                        # retrofit — raising (elevating) the whole home — so their
+                        # hover lists just Elevate (+ the No-Mitigation baseline).
+                        # Any non-RES2 home (RES1, RES3, RES4, …) shows every
+                        # applicable option. This is decided per building from its
+                        # own occupancy type, so a RES4 sitting inside a
+                        # mobile-homes-dominated area still shows its full menu.
+                        _row_occ = str(row.get('occupancy_type', '') or '').upper()
+                        _row_is_mobile = _row_occ.startswith('RES2')
+
                         for col in action_cols_p50:
                             action_name = col.replace('_P50', '')
                             val = row.get(col, 0)
 
-                            # Mobile-homes-dominated area: raising (elevating) the
-                            # home is the only realistic retrofit, so suppress every
-                            # other action (Raise Utilities, WFP Basement, WFP 1st
-                            # Floor, …) from the hover's strategy list. The
-                            # no-mitigation baseline and Elevate stay as the
-                            # reference + the single in-scope mitigation.
-                            if mobile_raise_only and action_name not in _RAISE_ONLY_ACTIONS:
+                            # RES2 (mobile/manufactured): suppress every non-Elevate
+                            # action from the hover's strategy list, leaving the
+                            # No-Mitigation baseline and Elevate. Non-RES2 homes fall
+                            # through and show their full applicable set.
+                            if _row_is_mobile and action_name not in _RAISE_ONLY_ACTIONS:
                                 continue
 
                             # Skip retrofits that don't physically apply to this
@@ -6772,13 +6793,19 @@ def main():
                         # Elevation/Residual. (The hover strategy list and the
                         # effectiveness COUNTS still honor the mobile-home toggle;
                         # this override is local to the map's category coloring.)
-                        _req_cols = (col_nomit, col_wfpb, col_elev)
-                        missing = [c for c in _req_cols if c not in df_map.columns]
+                        # No mitigation + Elevate are hard-required; the cheap
+                        # retrofit (yellow bucket) is optional. When its column is
+                        # absent — e.g. an inventory that is entirely RES2
+                        # manufactured housing, where Raise Utilities was dropped at
+                        # the data layer — the yellow bucket is simply skipped rather
+                        # than erroring the whole view.
+                        _core_cols = (col_nomit, col_elev)
+                        missing = [c for c in _core_cols if c not in df_map.columns]
+                        _cheap_available = col_wfpb in df_map.columns
                         if missing:
-                            _need = f"No mitigation, {cheap_retrofit_label}, and Elevate"
                             st.warning(
-                                f"This view needs P90 columns for {_need}. "
-                                f"Missing: {', '.join(missing)}"
+                                "This view needs P90 columns for No mitigation and "
+                                f"Elevate. Missing: {', '.join(missing)}"
                             )
                         else:
                             thr = ZERO_THRESH_DISPLAY  # treat damages below $1k as zero
@@ -6789,9 +6816,16 @@ def main():
                             elev_raw   = df_map[col_elev].values.astype(float)
 
                             no_mit = np.where(np.isnan(no_mit_raw), 0.0, no_mit_raw)
-                            # NaN in a retrofit column ==> "retrofit not applied" ==> baseline
-                            wfpb_raw = df_map[col_wfpb].values.astype(float)
-                            wfpb = np.where(np.isnan(wfpb_raw), no_mit, wfpb_raw)
+                            # NaN in a retrofit column ==> "retrofit not applied" ==> baseline.
+                            # If the cheap-retrofit column is absent entirely (e.g. an
+                            # all-RES2 inventory where Raise Utilities was dropped), set
+                            # it to baseline so its "to threshold" test is always False
+                            # and no building lands in the yellow bucket.
+                            if _cheap_available:
+                                wfpb_raw = df_map[col_wfpb].values.astype(float)
+                                wfpb = np.where(np.isnan(wfpb_raw), no_mit, wfpb_raw)
+                            else:
+                                wfpb = no_mit.copy()
                             elev   = np.where(np.isnan(elev_raw), no_mit, elev_raw)
                             
                             # --- MAP classifier (threshold rule) ---
@@ -6889,6 +6923,10 @@ def main():
                                 (3, 'Elevation',            '#f97316'),  # orange
                                 (4, 'Residual Damage',      '#dc2626'),  # red
                             ]
+                            # Cheap retrofit unavailable for this inventory (e.g.
+                            # all-RES2): drop its necessarily-empty yellow bucket.
+                            if not _cheap_available:
+                                cat_specs = [cs for cs in cat_specs if cs[0] != 2]
                             
                             for ci, label, color in cat_specs:
                                 df_c = df_map[df_map['_cat_action'] == ci]
