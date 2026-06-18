@@ -8388,7 +8388,132 @@ def main():
                         )
         else:
             st.warning("No data available for this location.")
-    
+
+    # ========================================================================
+    # OVERVIEW — STRUCTURE-VALUE DISTRIBUTION BY BUILDING CATEGORY
+    # Inventory view (independent of the page's occupancy filter): pick a
+    # building category — default RES2 (manufactured housing) — and see how
+    # many buildings fall in each structure-value band. Band edges use a
+    # "nice" round-number width (… 25k / 50k / 100k / 250k …) chosen from the
+    # data range so the ranges read cleanly on the axis.
+    # ========================================================================
+    if active == V_OVERVIEW:
+        _sv_attrs = loc_entry.get('bldg_attrs') if loc_entry else None
+        if (_sv_attrs is not None and len(_sv_attrs) > 0
+                and 'structure_value' in _sv_attrs.columns
+                and 'occupancy_type' in _sv_attrs.columns):
+            st.divider()
+            st.subheader("Structure-Value Distribution by Building Category")
+            st.markdown(
+                "<p style='color:#64748b;font-size:0.95rem;margin-top:-0.5rem;'>"
+                "How many buildings of a chosen category sit in each structure-value "
+                "band. This view spans the full inventory and is independent of the "
+                "occupancy filter above.</p>",
+                unsafe_allow_html=True,
+            )
+
+            _occ_counts = (_sv_attrs['occupancy_type'].dropna().astype(str)
+                           .str.upper().str.strip().value_counts())
+            _occ_options = list(_occ_counts.index)
+            if not _occ_options:
+                st.info("No occupancy information is available for this location.")
+            else:
+                _def_idx = _occ_options.index('RES2') if 'RES2' in _occ_options else 0
+                _sv_occ = st.selectbox(
+                    "Building category",
+                    _occ_options, index=_def_idx, key="ov_sv_occ",
+                    format_func=lambda c: f"{c}  ·  {int(_occ_counts[c]):,} buildings",
+                )
+
+                _occ_norm = _sv_attrs['occupancy_type'].astype(str).str.upper().str.strip()
+                _vals = pd.to_numeric(
+                    _sv_attrs.loc[_occ_norm == _sv_occ, 'structure_value'],
+                    errors='coerce').dropna()
+                _vals = _vals[_vals > 0]
+
+                if len(_vals) == 0:
+                    st.info(f"No positive structure values recorded for {_sv_occ}.")
+                else:
+                    def _nice_width(span, target=8):
+                        raw = max(span / target, 1.0)
+                        mag = 10.0 ** np.floor(np.log10(raw))
+                        for _m in (1, 2, 2.5, 5, 10):
+                            if raw <= _m * mag:
+                                return float(_m * mag)
+                        return float(10 * mag)
+
+                    def _fmt_money_k(v):
+                        if v >= 1e6:
+                            return f"${v/1e6:.1f}M".replace('.0M', 'M')
+                        return f"${v/1e3:.0f}k"
+
+                    def _hex_lerp(c1, c2, t):
+                        a = tuple(int(c1[i:i+2], 16) for i in (0, 2, 4))
+                        b = tuple(int(c2[i:i+2], 16) for i in (0, 2, 4))
+                        return '#%02x%02x%02x' % tuple(
+                            int(round(a[k] + (b[k] - a[k]) * t)) for k in range(3))
+
+                    vmin = float(_vals.min()); vmax = float(_vals.max())
+                    width = _nice_width((vmax - vmin) if vmax > vmin else vmax, target=8)
+                    lo = float(np.floor(vmin / width) * width)
+                    hi = float(np.ceil(vmax / width) * width)
+                    if hi <= lo:
+                        hi = lo + width
+                    edges = np.arange(lo, hi + width * 0.5, width)
+                    counts, _ = np.histogram(_vals, bins=edges)
+                    labels = [f"{_fmt_money_k(edges[i])}–{_fmt_money_k(edges[i+1])}"
+                              for i in range(len(edges) - 1)]
+
+                    # Light→deep indigo gradient by band: lower value = lighter,
+                    # higher value = deeper, so the value axis reads at a glance.
+                    _nb = max(len(labels) - 1, 1)
+                    bar_colors = [_hex_lerp('c7d2fe', '3730a3', i / _nb)
+                                  for i in range(len(labels))]
+                    _med = float(_vals.median())
+                    _ymax = max(int(counts.max()), 1)
+
+                    fig_sv = go.Figure()
+                    fig_sv.add_trace(go.Bar(
+                        x=labels, y=counts,
+                        marker=dict(color=bar_colors,
+                                    line=dict(color='rgba(15,23,42,0.12)', width=1)),
+                        text=[str(int(c)) if c > 0 else '' for c in counts],
+                        textposition='outside',
+                        textfont=dict(size=12, color='#334155'),
+                        hovertemplate='%{x}<br><b>%{y}</b> buildings<extra></extra>',
+                        cliponaxis=False,
+                    ))
+                    fig_sv.update_layout(
+                        title=dict(
+                            text=(f"{_sv_occ}  ·  {len(_vals):,} buildings  ·  "
+                                  f"median {_fmt_money_k(_med)}"),
+                            x=0.01, xanchor='left',
+                            font=dict(size=15, color='#0f172a')),
+                        height=430, plot_bgcolor='white', paper_bgcolor='white',
+                        margin=dict(l=64, r=24, t=58, b=84),
+                        bargap=0.18, showlegend=False,
+                        xaxis=dict(title='Structure value', tickangle=-30,
+                                   automargin=True, showgrid=False,
+                                   tickfont=dict(size=11, color='#475569'),
+                                   title_font=dict(size=12, color='#334155')),
+                        yaxis=dict(title='Number of buildings', automargin=True,
+                                   showgrid=True, gridcolor='#eef2f7', gridwidth=1,
+                                   zeroline=False, rangemode='tozero',
+                                   range=[0, _ymax * 1.18],
+                                   title_font=dict(size=12, color='#334155')),
+                    )
+                    # theme=None so the white background + custom gridlines are
+                    # honored (Streamlit's default plotly theme overrides them).
+                    st.plotly_chart(fig_sv, use_container_width=True,
+                                    theme=None, key="ov_sv_chart")
+                    st.caption(
+                        f"Inventory for **{location_name}** · category **{_sv_occ}** · "
+                        f"n = {len(_vals):,} · median {_fmt_money_k(_med)} · "
+                        f"range {_fmt_money_k(vmin)}–{_fmt_money_k(vmax)} · "
+                        f"band width {_fmt_money_k(width)}. Structure values are "
+                        "replacement-cost estimates from the building inventory."
+                    )
+
     # ========================================================================
     # TAB 3: BUILDING DETAILS
     # ========================================================================
