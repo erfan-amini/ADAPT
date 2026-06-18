@@ -1833,25 +1833,20 @@ def _bundle_normalize_target_year(series):
 
 
 def _bundle_build_attrs_table(lookup_df, nsi_df):
-    """Combine bldg_lookup (analysis-ready) with NSI (descriptive).
+    """Combine bldg_lookup (analysis-ready) with NSI (inventory source of truth).
 
-    Lookup is the source of truth for fields that drove the damage
-    calculation (lon/lat, structure/content values, FFE, DFE
-    status, SOID). NSI contributes building_type, number_of_stories, area,
-    foundation_type, foundation_height, year_built, address — fields the
-    lookup doesn't carry.
+    The NSI file is the maintained building inventory, so it is authoritative
+    for every attribute it carries — structure/content value, occupancy,
+    ground elevation, lon/lat, and the descriptive fields (building_type,
+    number_of_stories, area, foundation_type, foundation_height, year_built,
+    address). For those, the NSI value is used where present and the lookup
+    fills only the gaps. Fields the NSI file does NOT carry but that drove the
+    damage calculation — FFE_ft, DFE_Status, SOID, occupancy_group — always
+    come from the lookup.
     """
-    nsi = nsi_df.rename(columns={'ID': 'BuildingID'}).copy()
-    descriptive_only = ['building_type', 'number_of_stories', 'area',
-                        'foundation_type', 'foundation_height',
-                        'year_built', 'address']
-    desc_cols = ['BuildingID'] + [c for c in descriptive_only if c in nsi.columns]
-
-    out = lookup_df.merge(nsi[desc_cols], on='BuildingID', how='left')
-
-    # Lowercase rename to the schema the rest of the app already references.
-    # NB: We keep `FFE_ft`, `DFE_Status`, and `SOID` in their original
-    # case because the existing UI code looks them up by those exact names.
+    # 1. Map the analysis lookup to the app's lowercase schema. FFE_ft,
+    #    DFE_Status, and SOID keep their original case because the UI looks
+    #    them up by those exact names.
     rename = {
         'BuildingID':         'id',
         'OccupancyType':      'occupancy_type',
@@ -1861,16 +1856,30 @@ def _bundle_build_attrs_table(lookup_df, nsi_df):
         'GroundElevation_ft': 'ground_elevation',
         'Longitude':          'longitude',
         'Latitude':           'latitude',
-        # The canonical bundle format ships the column as `DFE_Status`
-        # with canonical values ('Above DFE' / 'Under DFE'). Legacy
-        # bundles (pre-rerun) shipped it as `Floodplain_Status` with
-        # 'In floodplain' / 'Out of floodplain' values — we accept that
-        # name as a fallback and normalize the values via
-        # convert_floodplain_status below. The function is a no-op for
-        # values that are already in canonical DFE form.
+        # Legacy bundles ship 'Floodplain_Status' ('In/Out of floodplain');
+        # canonical bundles ship 'DFE_Status' ('Above/Under DFE'). Accept the
+        # legacy name and normalize values via convert_floodplain_status below.
         'Floodplain_Status':  'DFE_Status',
     }
-    out = out.rename(columns=rename)
+    out = lookup_df.rename(columns=rename).copy()
+
+    # 2. NSI already uses the lowercase schema; align it by id and let it win.
+    nsi = nsi_df.rename(columns={'ID': 'id'}).copy()
+    if 'id' in nsi.columns and 'id' in out.columns:
+        out = out.set_index('id')
+        nsi = nsi.set_index('id')
+        nsi = nsi[~nsi.index.duplicated(keep='first')]
+        # 3. Overlay every NSI-supplied column: the NSI value wins where it is
+        #    present (non-null), the lookup fills the gaps, and NSI-only
+        #    columns (building_type, stories, area, …) are added outright.
+        for col in nsi.columns:
+            nsi_col = nsi[col].reindex(out.index)
+            if col in out.columns:
+                out[col] = nsi_col.combine_first(out[col])
+            else:
+                out[col] = nsi_col
+        out = out.reset_index()
+
     if 'DFE_Status' in out.columns:
         out['DFE_Status'] = out['DFE_Status'].apply(convert_floodplain_status)
     return out
@@ -2786,8 +2795,14 @@ def _cached_osm_roads(bbox):
 
 
 @st.cache_data(show_spinner=False)
-def load_bundle(data_folder, location_slug):
-    """Load a single-location CSV bundle and return the data_store entry."""
+def load_bundle(data_folder, location_slug, file_sig=None):
+    """Load a single-location CSV bundle and return the data_store entry.
+
+    `file_sig` is a fingerprint (per-file mtime+size) of the bundle's files.
+    It is unused in the body but participates in the cache key, so editing
+    any bundle file (e.g. the NSI xlsx) invalidates the cache and the bundle
+    is re-read on the next run — no manual "Clear cache" needed.
+    """
     join = lambda *p: os.path.join(data_folder, *p)
 
     # 1. Metadata
@@ -3150,7 +3165,17 @@ def load_data_from_folder(data_folder="."):
         if not all(os.path.exists(os.path.join(data_folder, r)) for r in required):
             continue
         try:
-            entry = load_bundle(data_folder, slug)
+            # Fingerprint every bundle file (mtime + size) so an edit to any of
+            # them — e.g. correcting a structure value in the NSI xlsx —
+            # invalidates load_bundle's cache and forces a fresh read.
+            _sig = tuple(
+                (os.path.getmtime(p), os.path.getsize(p))
+                for p in [meta_path] + [os.path.join(data_folder, r) for r in required]
+            )
+        except OSError:
+            _sig = None
+        try:
+            entry = load_bundle(data_folder, slug, file_sig=_sig)
         except Exception as e:
             # Don't kill the app on a malformed bundle — log and skip.
             print(f"[loader] failed to load '{slug}': {e}")
@@ -6743,7 +6768,10 @@ def main():
                         else:
                             df_zero = pd.DataFrame()
                             df_nonzero = df_map
-                        
+
+                        # Ring the buildings of interest beneath the markers.
+                        _add_highlight_ring(fig_map, df_map, ring_size=13 * _point_scale)
+
                         if len(df_zero) > 0:
                             fig_map.add_trace(go.Scattermapbox(
                                 lat=df_zero['latitude'], lon=df_zero['longitude'],
@@ -6788,7 +6816,8 @@ def main():
                                 customdata=list(df_nonzero['hover_data']),
                                 name='At Risk'
                             ))
-                    
+                        _add_highlight_ring_legend(fig_map)
+
                     # =====================================================
                     # VIEW 2 — Adaptation Effectiveness (4 categories)
                     # Ported from generate_action_animation.m
