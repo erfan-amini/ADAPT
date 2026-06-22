@@ -6734,7 +6734,7 @@ def main():
                     # every other building (residential or not) is left
                     # unringed. (Replaces the old non-residential ring.)
                     # =====================================================
-                    _HIGHLIGHT_RING_IDS = {10001, 10000013, 10002, 579513008}
+                    _HIGHLIGHT_RING_IDS = {10001, 10000013, 10002, 579513008, 10016}
 
                     def _add_highlight_ring(fig, df_subset, ring_size=13):
                         if location_name != "Pamunkey" or len(df_subset) == 0:
