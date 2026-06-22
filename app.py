@@ -6615,6 +6615,14 @@ def main():
                         _row_occ = str(row.get('occupancy_type', '') or '').upper()
                         _row_is_mobile = _row_occ.startswith('RES2')
 
+                        # Wet-floodproofing the FIRST floor only makes sense for
+                        # multi-story buildings (you retreat upstairs). For a
+                        # single-story building it would mean floodproofing the
+                        # whole living space, so we hide that line from the hover —
+                        # mirroring the building-detail cards. NaN stories => hide.
+                        _row_nstory = row.get('number_of_stories')
+                        _row_one_story = pd.isna(_row_nstory) or float(_row_nstory) <= 1
+
                         for col in action_cols_p50:
                             action_name = col.replace('_P50', '')
                             val = row.get(col, 0)
@@ -6624,6 +6632,11 @@ def main():
                             # No-Mitigation baseline and Elevate. Non-RES2 homes fall
                             # through and show their full applicable set.
                             if _row_is_mobile and action_name not in _RAISE_ONLY_ACTIONS:
+                                continue
+
+                            # Single-story buildings: wet-floodproofing the first
+                            # floor is not an applicable strategy — hide the line.
+                            if action_name == 'WFP 1st' and _row_one_story:
                                 continue
 
                             # Skip retrofits that don't physically apply to this
@@ -6715,11 +6728,11 @@ def main():
                     # Defaults to 2× for Pamunkey, 1× for other locations.
 
                     # =====================================================
-                    # Helper: ring a small set of specific "buildings of
-                    # interest" beneath any colored category trace. Only the
-                    # IDs in _HIGHLIGHT_RING_IDS are ringed, and only for
-                    # Pamunkey — every other building (residential or not) is
-                    # left unringed. (Replaces the old non-residential ring.)
+                    # Helper: ring a small set of specific Tribal buildings
+                    # beneath any colored category trace. Only the IDs in
+                    # _HIGHLIGHT_RING_IDS are ringed, and only for Pamunkey —
+                    # every other building (residential or not) is left
+                    # unringed. (Replaces the old non-residential ring.)
                     # =====================================================
                     _HIGHLIGHT_RING_IDS = {10001, 10000013, 10002, 579513008}
 
@@ -6732,7 +6745,7 @@ def main():
                             fig.add_trace(go.Scattermapbox(
                                 lat=hl['latitude'], lon=hl['longitude'],
                                 mode='markers',
-                                marker=dict(size=ring_size, color='black', opacity=0.85),
+                                marker=dict(size=ring_size, color='black', opacity=1.0),
                                 hoverinfo='skip',
                                 showlegend=False,
                                 name='_highlight_ring',
@@ -6740,7 +6753,7 @@ def main():
 
                     def _add_highlight_ring_legend(fig):
                         """Legend-only stub explaining the black ring. Shown only
-                        when Pamunkey actually has ringed buildings on screen."""
+                        when Pamunkey actually has ringed Tribal buildings on screen."""
                         if location_name != "Pamunkey":
                             return
                         if not pd.to_numeric(df_map['id'], errors='coerce').isin(
@@ -6748,8 +6761,8 @@ def main():
                             return
                         fig.add_trace(go.Scattermapbox(
                             lat=[None], lon=[None], mode='markers',
-                            marker=dict(size=10 * _point_scale, color='black', opacity=0.85),
-                            name='Buildings of interest (ringed)',
+                            marker=dict(size=10 * _point_scale, color='black', opacity=1.0),
+                            name='Tribal buildings (ringed)',
                             showlegend=True, hoverinfo='skip',
                         ))
                     
@@ -6769,7 +6782,7 @@ def main():
                             df_zero = pd.DataFrame()
                             df_nonzero = df_map
 
-                        # Ring the buildings of interest beneath the markers.
+                        # Ring the Tribal buildings beneath the markers.
                         _add_highlight_ring(fig_map, df_map, ring_size=13 * _point_scale)
 
                         if len(df_zero) > 0:
