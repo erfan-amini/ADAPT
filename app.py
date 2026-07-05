@@ -6842,43 +6842,45 @@ def main():
                         # (matches the Distributions tab and the workshop
                         # convention).
                         #
-                        # Per-location action swap: for Pamunkey, WFP Basement
-                        # is non-applicable (RES2 / pier inventory, no
-                        # basements — the applicability filter in load_bundle
-                        # drops those rows entirely). The cheapest retrofit
-                        # that actually eliminates upper-tail damage there is
-                        # Raise Utilities, so we plug it into the "cheapest
-                        # retrofit that eliminates damage" slot of the
-                        # classifier. The internal variable names below keep
-                        # the `wfpb*` spelling for code economy — they hold
-                        # whichever retrofit is playing that role for the
-                        # current location.
+                        # Cheap-retrofit (yellow) bucket: the set of low-cost
+                        # retrofits that can, on their own, bring a building's
+                        # upper-tail (P90) damage to ~zero. This used to be a
+                        # single per-location column (WFP Basement in basement
+                        # inventories; Raise Utilities at Pamunkey's RES2/pier
+                        # inventory, where WFP B is dropped at the data layer).
+                        # We now consider BOTH WFP Basement AND Raise Utilities
+                        # wherever their columns are present: a building lands in
+                        # the yellow bucket if EITHER cheap retrofit eliminates
+                        # its P90 damage. This restores Raise-Utilities
+                        # effectiveness on the map in areas that are NOT mobile-
+                        # home dominated (e.g. Mastic Beach), where it was
+                        # previously ignored in favour of WFP Basement. At
+                        # Pamunkey, WFP B is absent (dropped upstream), so only
+                        # Raise Utilities contributes there — behaviour unchanged.
                         col_nomit = 'No mitigation_P90'
-                        if location_name == "Pamunkey":
-                            col_wfpb = 'Raise Utilities_P90'
-                            cheap_retrofit_label = 'Raise Utilities'
-                        else:
-                            col_wfpb = 'WFP B_P90'
-                            cheap_retrofit_label = 'WFP Basement'
                         col_elev  = 'Elevate_P90'
+                        _cheap_specs = [
+                            ('WFP B_P90',           'WFP Basement'),
+                            ('Raise Utilities_P90', 'Raise Utilities'),
+                        ]
+                        _cheap_present = [(c, lbl) for c, lbl in _cheap_specs
+                                          if c in df_map.columns]
+                        _cheap_available = len(_cheap_present) > 0
+                        if len(_cheap_present) == 2:
+                            cheap_retrofit_label = 'WFP Basement / Raise Utilities'
+                        elif _cheap_present:
+                            cheap_retrofit_label = _cheap_present[0][1]
+                        else:
+                            cheap_retrofit_label = 'Cheap retrofit'
 
-                        # The Adaptation Effectiveness map always shows the cheap
-                        # retrofit (yellow) bucket — Raise Utilities at Pamunkey —
-                        # even in mobile-homes-dominated areas. A building whose P90
-                        # damage drops to ≤ the $1k "zero" threshold after raising
-                        # utilities reads yellow rather than being dropped to
-                        # Elevation/Residual. (The hover strategy list and the
-                        # effectiveness COUNTS still honor the mobile-home toggle;
-                        # this override is local to the map's category coloring.)
                         # No mitigation + Elevate are hard-required; the cheap
-                        # retrofit (yellow bucket) is optional. When its column is
-                        # absent — e.g. an inventory that is entirely RES2
-                        # manufactured housing, where Raise Utilities was dropped at
-                        # the data layer — the yellow bucket is simply skipped rather
-                        # than erroring the whole view.
+                        # retrofit (yellow bucket) is optional. When neither cheap
+                        # column is present — e.g. an inventory that is entirely
+                        # RES2 manufactured housing, where Raise Utilities was
+                        # dropped at the data layer — the yellow bucket is simply
+                        # skipped rather than erroring the whole view.
                         _core_cols = (col_nomit, col_elev)
                         missing = [c for c in _core_cols if c not in df_map.columns]
-                        _cheap_available = col_wfpb in df_map.columns
                         if missing:
                             st.warning(
                                 "This view needs P90 columns for No mitigation and "
@@ -6893,16 +6895,16 @@ def main():
                             elev_raw   = df_map[col_elev].values.astype(float)
 
                             no_mit = np.where(np.isnan(no_mit_raw), 0.0, no_mit_raw)
-                            # NaN in a retrofit column ==> "retrofit not applied" ==> baseline.
-                            # If the cheap-retrofit column is absent entirely (e.g. an
-                            # all-RES2 inventory where Raise Utilities was dropped), set
-                            # it to baseline so its "to threshold" test is always False
-                            # and no building lands in the yellow bucket.
-                            if _cheap_available:
-                                wfpb_raw = df_map[col_wfpb].values.astype(float)
-                                wfpb = np.where(np.isnan(wfpb_raw), no_mit, wfpb_raw)
-                            else:
-                                wfpb = no_mit.copy()
+                            # A building is in the yellow bucket if ANY available
+                            # cheap retrofit brings its P90 to <= thr. NaN in a
+                            # retrofit column ==> "retrofit not applied" ==>
+                            # baseline (so a missing value can't push a building
+                            # into yellow).
+                            cheap_to_thr = np.zeros(len(df_map), dtype=bool)
+                            for _cc, _clbl in _cheap_present:
+                                _cheap_raw = df_map[_cc].values.astype(float)
+                                _cheap_val = np.where(np.isnan(_cheap_raw), no_mit, _cheap_raw)
+                                cheap_to_thr |= (_cheap_val <= thr)
                             elev   = np.where(np.isnan(elev_raw), no_mit, elev_raw)
                             
                             # --- MAP classifier (threshold rule) ---
@@ -6914,10 +6916,10 @@ def main():
                             # nothing works.
                             #
                             #   1 = No Damage     baseline P90 ≤ thr
-                            #   2 = Cheap fix     baseline > thr AND the
+                            #   2 = Cheap fix     baseline > thr AND at least one
                             #                     cheap retrofit (WFP Basement
-                            #                     elsewhere, Raise Utilities
-                            #                     in Pamunkey) brings P90 ≤ thr
+                            #                     and/or Raise Utilities, whichever
+                            #                     are present) brings P90 ≤ thr
                             #   3 = Elevation     baseline > thr, cheap retrofit
                             #                     doesn't reach thr, but elevation
                             #                     DOES bring P90 ≤ thr
@@ -6953,7 +6955,6 @@ def main():
                             # threshold rule makes the orange/red split honest:
                             # orange means elevation eliminates damage, red
                             # means it doesn't.
-                            wfpb_to_thr = wfpb <= thr
                             elev_to_thr = elev <= thr
 
                             # Under-DFE membership mask (Above-DFE buildings
@@ -6972,9 +6973,9 @@ def main():
                             # placed in 1–4 drops off the map quietly.
                             cat = np.full(len(df_map), 5, dtype=int)
                             cat[no_mit <= thr] = 1
-                            cat[(no_mit > thr) & wfpb_to_thr] = 2
-                            cat[(no_mit > thr) & ~wfpb_to_thr & elev_to_thr] = 3
-                            cat[(no_mit > thr) & ~wfpb_to_thr & ~elev_to_thr & is_under_dfe] = 4
+                            cat[(no_mit > thr) & cheap_to_thr] = 2
+                            cat[(no_mit > thr) & ~cheap_to_thr & elev_to_thr] = 3
+                            cat[(no_mit > thr) & ~cheap_to_thr & ~elev_to_thr & is_under_dfe] = 4
 
                             df_map['_cat_action'] = cat
 
@@ -7527,15 +7528,17 @@ def main():
                                 "black ring. Uncheck the sidebar option to compare all retrofits."
                             )
                         else:
-                            # Caption uses the same per-location action swap as
-                            # the classifier above: for Pamunkey, "Raise Utilities"
-                            # plays the role of "WFP Basement" everywhere else.
-                            if location_name == "Pamunkey":
-                                _cheap_lbl = "Raise Utilities"
-                                _cheap_desc = "raising at-risk utilities"
-                            else:
-                                _cheap_lbl = "WFP Basement"
-                                _cheap_desc = "basement floodproofing"
+                            # Caption mirrors the classifier: the yellow bucket is
+                            # whichever cheap retrofit(s) are present in the data —
+                            # WFP Basement and/or Raise Utilities.
+                            _cheap_lbl = cheap_retrofit_label
+                            _desc_map = {
+                                'WFP Basement':    'basement floodproofing',
+                                'Raise Utilities': 'raising at-risk utilities',
+                            }
+                            _descs = [_desc_map.get(lbl, lbl.lower())
+                                      for _c, lbl in _cheap_present]
+                            _cheap_desc = ' or '.join(_descs) if _descs else 'a cheap retrofit'
                             st.caption(
                                 "Each building is colored by the **cheapest adaptation that "
                                 "eliminates** its upper-tail (P90) cumulative damage under "
@@ -7543,14 +7546,14 @@ def main():
                                 "priority order: "
                                 "**No Damage** (baseline P90 ≤ $1k — no intervention needed) → "
                                 f"**{_cheap_lbl}** ({_cheap_desc} brings P90 ≤ $1k) → "
-                                f"**Elevation** ({_cheap_lbl} doesn't reach the threshold but "
-                                "elevation does) → "
-                                "**Residual Damage** (Under-DFE buildings where neither "
-                                f"{_cheap_lbl.lower()} nor elevation can bring P90 ≤ $1k — "
+                                "**Elevation** (the cheap retrofit doesn't reach the threshold "
+                                "but elevation does) → "
+                                "**Residual Damage** (Under-DFE buildings where neither the "
+                                "cheap retrofit nor elevation can bring P90 ≤ $1k — "
                                 "the conversation has to move beyond retrofits, to buyout, "
                                 "relocation, or larger community-scale interventions). "
                                 "Above-DFE buildings whose damage isn't eliminated by the "
-                                f"two retrofits shown ({_cheap_lbl} or elevation) are not "
+                                "retrofits shown are not "
                                 "plotted on this view — their relevant adaptation options "
                                 "(wet floodproofing the first floor, content-only measures, "
                                 "etc.) aren't represented in the three-bucket pyramid above. "
