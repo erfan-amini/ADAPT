@@ -4405,9 +4405,9 @@ def main():
         # child of the label, so `div:first-child` matched nothing on this
         # Streamlit build and the dot stayed (turning red/#FF4B4B when the tab
         # was selected). `div:first-of-type` targets the first DIV child
-        # specifically — the circle wrapper — while leaving the label's text
-        # (a separate markdown div) untouched. Hiding the input is belt-and-
-        # suspenders in case a future build reorders the children.
+        # specifically, i.e. the circle wrapper, while leaving the label's
+        # text (a separate markdown div) untouched. Hiding the input too is a
+        # safety net in case a future Streamlit build reorders the children.
         "section[data-testid=\"stSidebar\"] [role=\"radiogroup\"] > label > div:first-of-type,\n"
         "section[data-testid=\"stSidebar\"] [role=\"radiogroup\"] > label input[type=\"radio\"] { display: none !important; }\n"
         # FORCE plain white on the label text, whatever the inner element is.
