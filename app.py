@@ -4400,7 +4400,16 @@ def main():
         "    border-radius: 10px; cursor: pointer; background: transparent;\n"
         "    transition: background-color 0.2s ease, transform 0.2s ease, box-shadow 0.2s ease;\n"
         "}\n"
-        "section[data-testid=\"stSidebar\"] [role=\"radiogroup\"] > label > div:first-child { display: none !important; }\n"
+        # Hide the little radio circle on the left of each nav item. The
+        # visible ring is a <div>, but the native <input> is the actual first
+        # child of the label, so `div:first-child` matched nothing on this
+        # Streamlit build and the dot stayed (turning red/#FF4B4B when the tab
+        # was selected). `div:first-of-type` targets the first DIV child
+        # specifically — the circle wrapper — while leaving the label's text
+        # (a separate markdown div) untouched. Hiding the input is belt-and-
+        # suspenders in case a future build reorders the children.
+        "section[data-testid=\"stSidebar\"] [role=\"radiogroup\"] > label > div:first-of-type,\n"
+        "section[data-testid=\"stSidebar\"] [role=\"radiogroup\"] > label input[type=\"radio\"] { display: none !important; }\n"
         # FORCE plain white on the label text, whatever the inner element is.
         "section[data-testid=\"stSidebar\"] [role=\"radiogroup\"] > label,\n"
         "section[data-testid=\"stSidebar\"] [role=\"radiogroup\"] > label * {\n"
