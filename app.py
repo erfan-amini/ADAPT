@@ -6982,14 +6982,17 @@ def main():
                             #   4 = Elevation         baseline > thr, neither cheap
                             #                         retrofit reaches thr, but
                             #                         elevation brings P90 <= thr
-                            #   5 = Residual          Under-DFE, damaged, and even
-                            #                         ELEVATION cannot bring P90 to
-                            #                         zero (<= thr). This is defined
-                            #                         purely on elevation: the
-                            #                         damaged Under-DFE buildings
-                            #                         that raising the home still
-                            #                         cannot bring to zero at the
-                            #                         P90 upper-tail level. The
+                            #   5 = Residual          Damaged, still Under-DFE AND
+                            #                         below BFE, and even ELEVATION
+                            #                         cannot bring P90 to zero
+                            #                         (<= thr). Defined purely on
+                            #                         elevation: homes that raising
+                            #                         still can't bring to zero at
+                            #                         the P90 upper-tail level.
+                            #                         Homes at or above BFE are
+                            #                         excluded (already reasonably
+                            #                         protected) even inside the
+                            #                         BFE-to-DFE freeboard band. The
                             #                         strongest adaptation in scope
                             #                         leaves residual damage, so the
                             #                         conversation has to move to
@@ -7023,7 +7026,7 @@ def main():
 
                             # Under-DFE membership mask (Above-DFE buildings
                             # are NEVER classified as Residual - they fall
-                            # through to cat=5 / omitted instead).
+                            # through to cat=6 / omitted instead).
                             if 'DFE_Status' in df_map.columns:
                                 _dfe_lower = (df_map['DFE_Status']
                                               .fillna('').astype(str)
@@ -7031,6 +7034,22 @@ def main():
                                 is_under_dfe = _dfe_lower.str.contains('under').values
                             else:
                                 is_under_dfe = np.zeros(len(df_map), dtype=bool)
+
+                            # Above-BFE exclusion: a home whose first-floor
+                            # elevation (FFE) is at or above the Base Flood
+                            # Elevation is already reasonably protected, so it
+                            # must NOT be colored Residual Damage - even when it
+                            # sits in the BFE-to-DFE freeboard band (still tagged
+                            # "Under DFE"). Only homes we can affirmatively place
+                            # BELOW BFE stay eligible for Residual; a missing
+                            # FFE or BFE leaves a building eligible (we don't have
+                            # grounds to exclude it). NaN FFE compares False here.
+                            _bfe_val = (loc_entry or {}).get('bfe_ft')
+                            if 'FFE_ft' in df_map.columns and _bfe_val is not None and pd.notna(_bfe_val):
+                                _ffe_vals = pd.to_numeric(df_map['FFE_ft'], errors='coerce').values.astype(float)
+                                is_above_bfe = _ffe_vals >= float(_bfe_val)
+                            else:
+                                is_above_bfe = np.zeros(len(df_map), dtype=bool)
 
                             # Priority classification. Default = 6 (out of
                             # scope / omitted) so any building not affirmatively
@@ -7042,7 +7061,8 @@ def main():
                             cat[(no_mit > thr) & raiseu_to_thr] = 2
                             cat[(no_mit > thr) & ~raiseu_to_thr & wfpb_to_thr] = 3
                             cat[(no_mit > thr) & ~raiseu_to_thr & ~wfpb_to_thr & elev_to_thr] = 4
-                            cat[(no_mit > thr) & ~raiseu_to_thr & ~wfpb_to_thr & ~elev_to_thr & is_under_dfe] = 5
+                            cat[(no_mit > thr) & ~raiseu_to_thr & ~wfpb_to_thr & ~elev_to_thr
+                                & is_under_dfe & ~is_above_bfe] = 5
 
                             df_map['_cat_action'] = cat
 
@@ -7588,11 +7608,12 @@ def main():
                                 "🏠 **Mobile-homes-dominated area:** only **raising (elevating) homes** "
                                 "is considered. Each building is colored by whether raising it eliminates "
                                 "its upper-tail (P90) cumulative damage under the selected year and SLR "
-                                "scenario: **No Damage** (baseline P90 ≤ $1k - no intervention needed) → "
-                                "**Elevation** (raising the home brings P90 ≤ $1k) → **Residual Damage** "
-                                "(Under-DFE buildings where even raising the home leaves P90 above $1k - "
+                                "scenario: **No Damage** (baseline P90 \u2264 $1k - no intervention needed) \u2192 "
+                                "**Elevation** (raising the home brings P90 \u2264 $1k) \u2192 **Residual Damage** "
+                                "(Under-DFE homes **below BFE** where even raising the home leaves P90 above $1k - "
                                 "the conversation has to move beyond retrofits, to buyout, relocation, or "
-                                "community-scale interventions). Above-DFE buildings not eliminated by "
+                                "community-scale interventions). Homes at or above BFE are never colored "
+                                "Residual. Above-DFE buildings not eliminated by "
                                 "raising are not plotted. Non-residential buildings are marked with a "
                                 "black ring. Uncheck the sidebar option to compare all retrofits."
                             )
@@ -7619,11 +7640,12 @@ def main():
                                 f"{_cheap_chain} \u2192 "
                                 "**Elevation** (the cheaper retrofits don't reach the threshold "
                                 "but elevation does) \u2192 "
-                                "**Residual Damage** (Under-DFE buildings where even **elevation** "
-                                "cannot bring P90 \u2264 $1k, i.e. raising the home still can't bring "
-                                "the upper-tail damage to zero - the conversation has to move beyond "
-                                "retrofits, to buyout, relocation, or larger community-scale "
-                                "interventions). "
+                                "**Residual Damage** (Under-DFE homes **below BFE** where even "
+                                "**elevation** cannot bring P90 \u2264 $1k, i.e. raising the home still "
+                                "can't bring the upper-tail damage to zero - the conversation has to "
+                                "move beyond retrofits, to buyout, relocation, or larger community-scale "
+                                "interventions). Homes at or above BFE are never colored Residual, even "
+                                "inside the BFE-to-DFE freeboard band. "
                                 "Above-DFE buildings whose damage isn't eliminated by the "
                                 "retrofits shown are not "
                                 "plotted on this view - their relevant adaptation options "
