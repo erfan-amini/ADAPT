@@ -3872,7 +3872,8 @@ def build_box_whisker_panel(group_labels, scenario_data, panel_title="",
                             y_label="Cumulative Damage", bg_color=None,
                             height=520, label_zero_thresh=None,
                             lower_label="P05", upper_label="P95",
-                            lower_pct=0.05, upper_pct=0.95):
+                            lower_pct=0.05, upper_pct=0.95,
+                            median_label_shift=0.0):
     """Construct a Plotly box-and-whisker panel with grouped pairs of boxes.
 
     Parameters
@@ -4040,11 +4041,14 @@ def build_box_whisker_panel(group_labels, scenario_data, panel_title="",
     y_head = y_max_whisker * 1.22 if y_max_whisker > 0 else y_span * 0.2
     y_floor = y_min * 1.15 if y_min < 0 else 0
     label_gap = y_span * 0.025       # small vertical gap above each line/whisker
-    med_label_gap = label_gap * 0.15 # median label sits a touch closer to its line
+    # Median-label vertical offset. 0 (default) sits the label right at the
+    # median line; positive lifts it above the line, negative pushes it below.
+    # Expressed as a fraction of the y-axis span so it scales with the plot.
+    med_label_gap = float(median_label_shift) * y_span
 
     # Annotations: every label sits directly above its reference line -
-    #   * Median label sits just above the median line (yanchor='bottom'),
-    #     nudged down close to the line via the smaller med_label_gap.
+    #   * Median label sits at the median line by default (yanchor='bottom'),
+    #     offset up/down by med_label_gap (driven by median_label_shift).
     #   * P95 label sits just above the upper whisker
     # The lower whisker (P05) is intentionally NOT labeled.
     # X position is the exact numeric center of each box, so labels never
@@ -4052,7 +4056,7 @@ def build_box_whisker_panel(group_labels, scenario_data, panel_title="",
     for x_center, p05_v, p50_v, p95_v, line_clr in annot_records:
         med_text = fmt_money_rounded(p50_v) if abs(p50_v) >= label_zero_thresh else "$0"
         # Median - bold colored text on a semi-transparent white pill,
-        # placed just above the median line so it doesn't overlap it.
+        # positioned relative to the median line by median_label_shift.
         fig.add_annotation(
             x=x_center, y=p50_v + med_label_gap,
             text=f"<b>{med_text}</b>",
@@ -8136,6 +8140,15 @@ def main():
                         float(piv_p95.loc['No mitigation', slr_key]) - float(piv_p95.loc[action, slr_key]),
                     )
                 
+                # Median-label vertical position: adjustable via the slider
+                # rendered directly under these two panels. Stored as a percent
+                # of the axis height; 0 (default) sits each median label right
+                # at its median line. Read BEFORE building the figures so the
+                # slider (placed under the plots) drives them on the same rerun.
+                _med_shift_key = "agg_med_label_shift_pct"
+                ss.setdefault(_med_shift_key, 0.0)
+                _med_shift = float(ss[_med_shift_key]) / 100.0
+
                 # Cumulative-damage panel (all strategies)
                 sd_cum = {slr: [_agg_stats(a, slr) for a in actions_present_cs]
                           for slr, *_ in SCENARIO_SPECS}
@@ -8144,6 +8157,7 @@ def main():
                     scenario_data=sd_cum,
                     panel_title="Cumulative Damage",
                     y_label="Community-Total Cumulative Damage",
+                    median_label_shift=_med_shift,
                 )
                 
                 # Reduction panel (no baseline)
@@ -8157,6 +8171,7 @@ def main():
                         panel_title="Damage Reduction vs. No Mitigation",
                         y_label="Community-Total Damage Reduction",
                         bg_color='#f3f4f6',
+                        median_label_shift=_med_shift,
                     )
                 else:
                     fig_agg_red = None
@@ -8169,7 +8184,19 @@ def main():
                         st.plotly_chart(fig_agg_red, use_container_width=True)
                     else:
                         st.info("No retrofit strategies available for the reduction panel.")
-                
+
+                # Adjust where the median value labels sit relative to their
+                # median line. 0% (default) = no shift (label on the line);
+                # positive lifts labels above the line, negative pushes below.
+                st.slider(
+                    "Median label vertical shift (% of axis height)",
+                    min_value=-5.0, max_value=10.0, step=0.5,
+                    key=_med_shift_key,
+                    help="Nudge the median value labels up or down relative to "
+                         "the median line on the two panels above. Defaults to "
+                         "0% (no shift from the median).",
+                )
+
                 st.caption(
                     "Each box summarizes the distribution of the **community-total** cumulative "
                     "damage across Monte Carlo realizations. Box edges show the 25th and 75th "
