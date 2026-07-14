@@ -133,11 +133,11 @@ st.markdown("""
         margin-top: 0.5rem;
     }
 
-    /* Compact buttons — shorter overall height by trimming vertical padding.
+    /* Compact buttons - shorter overall height by trimming vertical padding.
        Applies to every st.button in the app for visual consistency. Width
        and font size are untouched, so button labels still fit on one line.
        `white-space: nowrap` on the inner paragraph forces the icon and the
-       label to stay on a single horizontal line — without it, Streamlit
+       label to stay on a single horizontal line - without it, Streamlit
        would break "🔍 Find" into two stacked lines whenever the column
        got narrow, which doubled the button's height. */
     .stButton > button {
@@ -151,12 +151,55 @@ st.markdown("""
         white-space: nowrap !important;
         margin: 0 !important;
     }
+
+    /* Rounded corners on the app logo / brand icon in the sidebar. */
+    section[data-testid="stSidebar"] [data-testid="stImage"] img {
+        border-radius: 12px;
+    }
+
+    /* Axis text (tick labels and axis titles) rendered in solid black on every
+       dynamic Plotly chart, so numbers and labels read clearly against the
+       light background (e.g. the Damage distributions page). */
+    [data-testid="stPlotlyChart"] .xtick text,
+    [data-testid="stPlotlyChart"] .ytick text,
+    [data-testid="stPlotlyChart"] .x2tick text,
+    [data-testid="stPlotlyChart"] .y2tick text,
+    [data-testid="stPlotlyChart"] text.xtitle,
+    [data-testid="stPlotlyChart"] text.ytitle,
+    [data-testid="stPlotlyChart"] .g-xtitle text,
+    [data-testid="stPlotlyChart"] .g-ytitle text {
+        fill: #000000 !important;
+    }
 </style>
 """, unsafe_allow_html=True)
 
 # ============================================================================
 # HELPER FUNCTIONS
 # ============================================================================
+
+# ----------------------------------------------------------------------------
+# Per-measure adaptation cost estimates.
+#
+# Source: the project workshop adaptation-measure table. Only the measure name
+# (its first column) and the cost range (its 4th column, "Cost") are used here;
+# the expected-benefit and remaining-recovery-cost columns from that table are
+# intentionally NOT used. Values are keyed by the app's internal Action names:
+#     "Elevate utilities"        -> Raise Utilities
+#     "Wet-floodproof basement"  -> WFP B
+#     "Wet-floodproof first floor" -> WFP 1st
+#     "Elevate house"            -> Elevate
+# ----------------------------------------------------------------------------
+ADAPTATION_COST_ESTIMATES = {
+    'Raise Utilities': '$5,000 - $40,000',
+    'WFP B':           '$8,500 - $30,000',
+    'WFP 1st':         '$10,000 - $100,000 or more',
+    'Elevate':         'Per sq ft: $50 - $120 or more',
+}
+ADAPTATION_COST_SOURCE = (
+    "Cost estimates per measure are taken from the project workshop "
+    "adaptation-measure table (measure name and cost columns only)."
+)
+
 
 def parse_filename(filename):
     """Parse filename to extract location."""
@@ -210,7 +253,7 @@ _BASEMENT_FOUNDATION_CODES = {'B'}
 
 # DFE-status strings (lowercased + whitespace-stripped) that mean
 # "this building is already above design flood elevation". For such
-# buildings, the Elevate retrofit provides no further benefit — the
+# buildings, the Elevate retrofit provides no further benefit - the
 # data generator typically encodes this as a no-op, but we drop the
 # row explicitly as a backstop so it doesn't slip through into hovers
 # or charts due to numerical drift.
@@ -223,7 +266,7 @@ def retrofit_applies(action, foundation_type=None, dfe_status=None):
 
     A retrofit that doesn't apply (e.g., wet-floodproofing a basement
     that doesn't exist, or elevating a building that's already above
-    DFE) should not appear in the UI — its "damage" value is an
+    DFE) should not appear in the UI - its "damage" value is an
     artifact of the math running regardless of whether the retrofit is
     meaningful, and showing it as a $0 / -100% saving is actively
     misleading.
@@ -270,7 +313,7 @@ def convert_floodplain_status(status):
     """Normalize a building's DFE-status string to canonical values.
 
     Canonical bundles already ship `DFE_Status` with the values
-    'Above DFE' / 'Under DFE' — those pass through unchanged. Legacy
+    'Above DFE' / 'Under DFE' - those pass through unchanged. Legacy
     bundles shipped the column as 'In floodplain' / 'Out of floodplain';
     we map those to the canonical wording here so every downstream
     comparison can assume a single vocabulary. Anything we don't
@@ -338,7 +381,7 @@ def fmt_money_short(value):
 def fmt_money_rounded(value):
     """Rounded currency label for on-plot value annotations (box-and-whisker
     labels etc.). Millions and billions show ONE decimal place, with the
-    decimal dropped when it's zero — e.g. $229.23M → $229.2M, $229.04M →
+    decimal dropped when it's zero - e.g. $229.23M → $229.2M, $229.04M →
     $229M, $12.79B → $12.8B, $12.00B → $12B. Sub-million values are rounded
     to integers: $4.8k → $5k, $4800 → $4800. Zero renders as $0."""
     if pd.isna(value):
@@ -409,7 +452,7 @@ def load_csv_file(filepath):
 # is fully self-contained (no external HTML asset required). The tool is the
 # standalone React/Leaflet survey app, reworked so its controls sit in a
 # compact top toolbar and its building-detail form stays as a right panel.
-# A sibling `nsi_tool.html` on disk, if present, OVERRIDES this embed — handy
+# A sibling `nsi_tool.html` on disk, if present, OVERRIDES this embed - handy
 # for editing the tool without regenerating the blob below.
 _NSI_TOOL_HTML_B64 = """
 PCFET0NUWVBFIGh0bWw+CjxodG1sIGxhbmc9ImVuIj4KPGhlYWQ+CiAgPG1ldGEgY2hhcnNldD0iVVRGLTgiPgogIDxtZXRhIG5h
@@ -1763,14 +1806,14 @@ def load_nsi_tool_html():
 # ----------------------------------------------------------------------------
 # The upstream pipeline ships a per-location bundle of seven files:
 #
-#   {LOCATION}_metadata.csv                            — key/value metadata
-#   {LOCATION}_bldg_lookup.csv                         — analysis-ready bldg attrs
-#   {LOCATION}_bldg_CumulativeDamage.csv               — bldg × (year, action, slr) × pcts
-#   {LOCATION}_CumulativeDamage_categories.csv         — 4 leaf categories × ... × pcts
-#   {LOCATION}_skipped_buildings.csv                   — provenance log (optional)
-#   DDD___{LOCATION}___NSI.xlsx                        — full NSI descriptors
-#   DDD___{LOCATION}_MC_annual_max_waterlevels_P50.csv — Year × MC_0001..MC_1000
-#   DDD___{LOCATION}_MC_annual_max_waterlevels_P90.csv — same for high-end SLR
+#   {LOCATION}_metadata.csv                            - key/value metadata
+#   {LOCATION}_bldg_lookup.csv                         - analysis-ready bldg attrs
+#   {LOCATION}_bldg_CumulativeDamage.csv               - bldg × (year, action, slr) × pcts
+#   {LOCATION}_CumulativeDamage_categories.csv         - 4 leaf categories × ... × pcts
+#   {LOCATION}_skipped_buildings.csv                   - provenance log (optional)
+#   DDD___{LOCATION}___NSI.xlsx                        - full NSI descriptors
+#   DDD___{LOCATION}_MC_annual_max_waterlevels_P50.csv - Year × MC_0001..MC_1000
+#   DDD___{LOCATION}_MC_annual_max_waterlevels_P90.csv - same for high-end SLR
 #
 # Canonical schema (matches the current Pamunkey rerun and the format every
 # location will ship in going forward):
@@ -1791,7 +1834,7 @@ def load_nsi_tool_html():
 #     _bundle_normalize_target_year.
 #   * The categories file is loaded but only used for an optional sanity
 #     check, so the legacy RES_InFP / RES_OutFP naming doesn't matter at
-#     runtime — community aggregates are now built from the per-building
+#     runtime - community aggregates are now built from the per-building
 #     table (sum-of-percentiles), eliminating the ~5% reconciliation gap
 #     the old format had between sum-of-medians and median-of-sum.
 
@@ -1836,12 +1879,12 @@ def _bundle_build_attrs_table(lookup_df, nsi_df):
     """Combine bldg_lookup (analysis-ready) with NSI (inventory source of truth).
 
     The NSI file is the maintained building inventory, so it is authoritative
-    for every attribute it carries — structure/content value, occupancy,
+    for every attribute it carries - structure/content value, occupancy,
     ground elevation, lon/lat, and the descriptive fields (building_type,
     number_of_stories, area, foundation_type, foundation_height, year_built,
     address). For those, the NSI value is used where present and the lookup
     fills only the gaps. Fields the NSI file does NOT carry but that drove the
-    damage calculation — FFE_ft, DFE_Status, SOID, occupancy_group — always
+    damage calculation - FFE_ft, DFE_Status, SOID, occupancy_group - always
     come from the lookup.
     """
     # 1. Map the analysis lookup to the app's lowercase schema. FFE_ft,
@@ -1903,7 +1946,7 @@ def _bundle_wl_percentiles_from_mc(wl_mc):
 
 
 # ============================================================================
-# FLOOD-MAP (BATHTUB) SUPPORT — inlined so the app is a single file.
+# FLOOD-MAP (BATHTUB) SUPPORT - inlined so the app is a single file.
 # Terrain: USGS 3DEP 1/3 arc-second (~10 m), public-domain NAVD88 metres,
 # Cloud-Optimized GeoTIFFs on AWS `prd-tnm`; only the ROI window is read via
 # GDAL /vsicurl HTTP range requests. Bathtub model (no hydraulic connectivity).
@@ -2364,7 +2407,7 @@ def classify_roads_access(Zm, ext, roads, wl_ft, sample_m=8.0,
 
         0 = dry & accessible   (a dry path to the outside world still exists)
         1 = dry & INACCESSIBLE (dry itself, but every dry route out is severed
-                                by flooding — e.g. both ends flooded, or one end
+                                by flooding - e.g. both ends flooded, or one end
                                 flooded and the other a dead-end, or stranded
                                 behind a flooded road as part of a cut-off cluster)
         2 = flooded            (the road surface is below the water level)
@@ -2385,7 +2428,7 @@ def classify_roads_access(Zm, ext, roads, wl_ft, sample_m=8.0,
     counts['predisc']).
 
     source: 'boundary' (default) treats roads leaving the map as exits to the
-    wider world — the most defensible anchor when the map is a sub-area of a
+    wider world - the most defensible anchor when the map is a sub-area of a
     larger network. 'largest' instead treats the biggest dry component as the
     mainland; used automatically as a fallback if no boundary exits are found.
 
@@ -2393,9 +2436,9 @@ def classify_roads_access(Zm, ext, roads, wl_ft, sample_m=8.0,
     entrance that should stay open even when the entrance road itself floods
     (e.g. a low causeway that is the site's only access and floods first). For
     each gateway we take the nearest network node, walk the CONTIGUOUS flooded
-    blob outward from it up to entrance_reach_m (network metres) — capturing the
+    blob outward from it up to entrance_reach_m (network metres) - capturing the
     flooded entrance and its flooded gateway intersection but not a separate
-    interior flood — reconnect that blob, and treat the gateway as connected to
+    interior flood - reconnect that blob, and treat the gateway as connected to
     the outside. The entrance road still renders red where flooded; it just no
     longer severs the whole site. Interior floods that form their own separate
     blobs keep stranding roads normally, so this never over-rescues.
@@ -2551,8 +2594,8 @@ def classify_roads_access(Zm, ext, roads, wl_ft, sample_m=8.0,
     # Designated main-entrance exemption. Access can come through the entrance road
     # and its (often flooded) gateway intersection, so for each gateway we take the
     # nearest node, walk the contiguous flooded blob outward up to entrance_reach_m
-    # (network metres) — capturing the flooded entrance + flooded gateway but not a
-    # separate interior flood — reconnect that blob, and make the gateway a source.
+    # (network metres) - capturing the flooded entrance + flooded gateway but not a
+    # separate interior flood - reconnect that blob, and make the gateway a source.
     n_entry = 0
     if entry_points:
         import heapq
@@ -2649,12 +2692,12 @@ def detect_main_entrance(roads, ext, site_lonlat, snap_dp=6, boundary_tol_m=40.0
     The connection to the outside is anchored on the building cluster's OWN
     component: a classified main road if one is present in that component, else the
     component's boundary exits (roads leaving the map). This is deliberately NOT
-    anchored on the global classified main road — at sites like Pamunkey the
+    anchored on the global classified main road - at sites like Pamunkey the
     reservation network is a separate OSM component whose nearest classified road
     (King William Rd) is ~1 km away and never shares a node, so a main-road anchor
     would find no path and return nothing. The gateway is the first junction
     (degree >= 3) reached after leaving the anchor on the path toward the cluster,
-    i.e. where the single entrance corridor meets the local network — placing the
+    i.e. where the single entrance corridor meets the local network - placing the
     exemption at the entrance, not deep inside the site."""
     from collections import deque
     xy, adj, ismain, deg = _entrance_nodes_edges(roads, snap_dp)
@@ -2801,7 +2844,7 @@ def load_bundle(data_folder, location_slug, file_sig=None):
     `file_sig` is a fingerprint (per-file mtime+size) of the bundle's files.
     It is unused in the body but participates in the cache key, so editing
     any bundle file (e.g. the NSI xlsx) invalidates the cache and the bundle
-    is re-read on the next run — no manual "Clear cache" needed.
+    is re-read on the next run - no manual "Clear cache" needed.
     """
     join = lambda *p: os.path.join(data_folder, *p)
 
@@ -2820,10 +2863,10 @@ def load_bundle(data_folder, location_slug, file_sig=None):
             except ValueError:
                 continue
 
-    # 2. NSI (271 rows incl. the building that gets skipped — joined later)
+    # 2. NSI (271 rows incl. the building that gets skipped - joined later)
     nsi = pd.read_excel(join(f'DDD___{location_slug}___NSI.xlsx'))
 
-    # 3. Building lookup (270 rows — only buildings that were actually analyzed)
+    # 3. Building lookup (270 rows - only buildings that were actually analyzed)
     lookup = pd.read_csv(join(f'{location_slug}_bldg_lookup.csv'))
     bldg_attrs = _bundle_build_attrs_table(lookup, nsi)
 
@@ -2845,7 +2888,7 @@ def load_bundle(data_folder, location_slug, file_sig=None):
     # ---- Defensive correction for MATLAB Elevate no-op artifact ----
     # The MATLAB damage generator (AAA___Main_v9.m) skips the elevation math
     # for buildings tagged `DFE_Status == "Above DFE"` and just
-    # sets `Dmg(:,:,4,si) = dmg_baseline` — i.e. Elevate equals No mitigation
+    # sets `Dmg(:,:,4,si) = dmg_baseline` - i.e. Elevate equals No mitigation
     # exactly, by construction. The DFE_Status flag is itself derived
     # from the building's first-floor elevation (FFE) being above the design
     # flood elevation (DFE = BFE + 2 ft), but FFE = ground + foundation height,
@@ -2854,7 +2897,7 @@ def load_bundle(data_folder, location_slug, file_sig=None):
     # the FFE above the DFE. The combined effect: a non-trivial number of
     # Above-DFE buildings have substantial baseline damage AND a no-op'd Elevate
     # column, which makes them look like "Residual: even elevation can't help"
-    # on the Adaptation Effectiveness map — when in reality elevation simply
+    # on the Adaptation Effectiveness map - when in reality elevation simply
     # wasn't computed for them. We detect the no-op (Elevate exactly equals
     # No-mitigation across every percentile column for a given (building,
     # year, SLR)) and replace the affected Elevate row's percentile values
@@ -2871,7 +2914,7 @@ def load_bundle(data_folder, location_slug, file_sig=None):
         bldg_dmg = bldg_dmg.merge(nm_lookup, on=['id', 'TargetYear', 'SLR'],
                                   how='left')
         # Compare Elevate row by row against its No-Mit twin. We use exact
-        # equality across ALL percentile columns simultaneously — anything
+        # equality across ALL percentile columns simultaneously - anything
         # else is an actual elevation calculation, even if it happens to be
         # numerically close to baseline. exact-match catches the no-op.
         is_elev = bldg_dmg['Action'] == 'Elevate'
@@ -2882,7 +2925,7 @@ def load_bundle(data_folder, location_slug, file_sig=None):
             same = (bldg_dmg[c] == bldg_dmg[nm_col]) | \
                    (bldg_dmg[c].isna() & bldg_dmg[nm_col].isna())
             is_noop &= same
-        # Also require at least one column to be non-zero — a real
+        # Also require at least one column to be non-zero - a real
         # all-zeros Elevate row (no damage to begin with) shouldn't be
         # flagged as no-op.
         any_nonzero = pd.Series(False, index=bldg_dmg.index)
@@ -2923,7 +2966,7 @@ def load_bundle(data_folder, location_slug, file_sig=None):
     # the action doesn't physically apply is simply removed from
     # df_buildings. That makes the action vanish from the hover, the
     # map classification, the dropdowns, the box plots, the
-    # trajectories, and every aggregate downstream — one filter, one
+    # trajectories, and every aggregate downstream - one filter, one
     # consistent story across the whole app. The wide-form pivot in
     # prepare_map_data() will produce NaN for the dropped (building,
     # action) cells, and the hover loop below skips NaN cells so
@@ -2965,7 +3008,7 @@ def load_bundle(data_folder, location_slug, file_sig=None):
     # Basement, and WFP 1st Floor for RES2 buildings. This makes those actions
     # vanish from the hover, the map (including the Adaptation-Effectiveness
     # yellow "cheap retrofit" bucket), the distributions, and every aggregate
-    # — a RES2 home can only ever be classified under Elevate.
+    # - a RES2 home can only ever be classified under Elevate.
     if 'occupancy_type' in df_buildings.columns:
         _is_res2 = (df_buildings['occupancy_type']
                     .fillna('').astype(str).str.upper().str.startswith('RES2'))
@@ -2997,7 +3040,7 @@ def load_bundle(data_folder, location_slug, file_sig=None):
     # supposed to give MC-correct community percentiles (computed from sums
     # of MC realizations across buildings, not from summing per-building
     # percentiles), but real data sometimes ships with the No-Mitigation
-    # rows zeroed out — which makes the Summary metric read $0 while the
+    # rows zeroed out - which makes the Summary metric read $0 while the
     # retrofit rows still hold real values, and the "Damage Reduction"
     # chart then plots NEGATIVE reductions because it computes
     # `baseline − retrofit = 0 − $235M`. To keep the Summary, the box-
@@ -3006,7 +3049,7 @@ def load_bundle(data_folder, location_slug, file_sig=None):
     # (the same source the per-building visuals read from). The
     # statistical concession is that we use sum-of-percentiles rather
     # than percentile-of-sum for the tails (P05/P95), which slightly
-    # overstates community tails — but consistency is far more important
+    # overstates community tails - but consistency is far more important
     # for decision support than that small bias, and the median (P50) is
     # essentially unaffected.
     is_res = bldg_attrs['occupancy_type'].apply(is_residential)
@@ -3077,7 +3120,7 @@ def load_bundle(data_folder, location_slug, file_sig=None):
     # Optional sanity comparison: if the categories CSV is present, log
     # how its 'All' P50 differs from the per-building P50 we just built.
     # We don't surface this in the UI because the per-building source
-    # is now canonical — the comparison just helps when debugging
+    # is now canonical - the comparison just helps when debugging
     # data-pipeline issues for a new location.
     cat_csv_path = join(f'{location_slug}_CumulativeDamage_categories.csv')
     cat = None
@@ -3087,7 +3130,7 @@ def load_bundle(data_folder, location_slug, file_sig=None):
     except (FileNotFoundError, pd.errors.EmptyDataError):
         pass
 
-    # 7. Water levels — load raw MC + pre-compute percentile shim
+    # 7. Water levels - load raw MC + pre-compute percentile shim
     water_levels = {}
     for slr_key, fname_suffix in (('50th-percentile', 'P50'),
                                    ('90th-percentile', 'P90')):
@@ -3126,7 +3169,7 @@ def _bundle_pretty_location_name(slug):
     pretty = parse_filename(slug + '.csv')
     # parse_filename's known-pattern path returns names with spaces
     # ('Mastic Beach'); its fallback path returns the slug unchanged. We
-    # only trust the result when it actually inserted a space — otherwise
+    # only trust the result when it actually inserted a space - otherwise
     # we run our own CamelCase-aware splitter to handle slugs the table
     # doesn't know about.
     if pretty != 'Unknown Location' and ' ' in pretty:
@@ -3145,7 +3188,7 @@ def load_data_from_folder(data_folder="."):
 
     A bundle is identified by the presence of `{slug}_metadata.csv` plus
     the four required companion files. Locations missing any required
-    file are skipped silently — we don't claim partial bundles.
+    file are skipped silently - we don't claim partial bundles.
     """
     data_store = {}
     available_locations = set()
@@ -3166,7 +3209,7 @@ def load_data_from_folder(data_folder="."):
             continue
         try:
             # Fingerprint every bundle file (mtime + size) so an edit to any of
-            # them — e.g. correcting a structure value in the NSI xlsx —
+            # them - e.g. correcting a structure value in the NSI xlsx -
             # invalidates load_bundle's cache and forces a fresh read.
             _sig = tuple(
                 (os.path.getmtime(p), os.path.getsize(p))
@@ -3177,7 +3220,7 @@ def load_data_from_folder(data_folder="."):
         try:
             entry = load_bundle(data_folder, slug, file_sig=_sig)
         except Exception as e:
-            # Don't kill the app on a malformed bundle — log and skip.
+            # Don't kill the app on a malformed bundle - log and skip.
             print(f"[loader] failed to load '{slug}': {e}")
             continue
         # Use the metadata's own LOCATION when present; fall back to slug.
@@ -3207,11 +3250,11 @@ def compute_damage_bin_breaks(df_buildings, scenario,
     
     This guarantees that switching the year on the Damage Bins map
     redistributes buildings *across* the same bins, rather than redefining
-    the bins themselves — which makes year-to-year comparisons meaningful.
+    the bins themselves - which makes year-to-year comparisons meaningful.
     
     The upper-tail percentile used here is **P90**, matching the workshop
     convention and the Distributions tab's "Building Counts by Adaptation
-    Effectiveness" classifier — so the same building gets the same
+    Effectiveness" classifier - so the same building gets the same
     Damage-Bins color, the same Adaptation-Effectiveness category, and the
     same Distributions-tab bucket.
 
@@ -3301,7 +3344,7 @@ def compute_flood_occurrences(_mc_df, _ffe_by_id, sig):
     we count, across every year from the first MC year through the selected
     horizon, how many years the simulated annual-maximum water level exceeds
     the building's first-floor elevation (FFE). That yields one occurrence
-    count per MC column per building — up to 1,000 numbers — and we then
+    count per MC column per building - up to 1,000 numbers - and we then
     report percentiles of that distribution (P10 / P25 / P50 / P75 / P90),
     mirroring the percentile reporting used throughout the tool.
 
@@ -3314,7 +3357,7 @@ def compute_flood_occurrences(_mc_df, _ffe_by_id, sig):
         First-floor elevation (ft NAVD88) per building id. Underscore-
         prefixed for the same reason.
     sig : tuple
-        (location_name, scenario, horizon_year) — the ONLY hashed argument.
+        (location_name, scenario, horizon_year) - the ONLY hashed argument.
         It uniquely determines `_mc_df` and `_ffe_by_id`, so the cache key is
         correct even though the big inputs are skipped. Keep this computed
         over ALL location buildings (not the occupancy/DFE-filtered subset)
@@ -3323,7 +3366,7 @@ def compute_flood_occurrences(_mc_df, _ffe_by_id, sig):
     Returns
     -------
     DataFrame with columns id, occ_P10, occ_P25, occ_P50, occ_P75, occ_P90,
-    occ_mean, n_years, horizon — or None when there's nothing to compute.
+    occ_mean, n_years, horizon - or None when there's nothing to compute.
     """
     location_name, scenario, horizon_year = sig
     mc_cols = [c for c in _mc_df.columns if c.startswith('MC_')]
@@ -3431,7 +3474,7 @@ _BASEMAP_ATTRIB = {
 }
 
 
-# ESRI World Imagery raster tile source — overlaid on a white-bg base
+# ESRI World Imagery raster tile source - overlaid on a white-bg base
 # to render aerial photography without needing a Mapbox access token.
 # (Plotly's native "satellite" / "satellite-streets" styles do require
 # a token; ESRI's public tiles do not, which keeps the app working out
@@ -3497,7 +3540,7 @@ def build_publication_map_figure(fig_map, *, location, occupancy, target_year,
     location, occupancy, target_year, scenario_label, map_view : str
         Pieces used to build the title and subtitle.
     df_map : pandas.DataFrame
-        The per-building map dataframe — used to recompute the bbox-based
+        The per-building map dataframe - used to recompute the bbox-based
         center and zoom independently of the live figure (so the export
         always frames the data the same way regardless of user pan/zoom).
     width_px, height_px : int
@@ -3509,7 +3552,7 @@ def build_publication_map_figure(fig_map, *, location, occupancy, target_year,
         also free. Other styles may require a Mapbox token.
     center_lat_override, center_lon_override, zoom_override : float | None
         If any of these is provided, override the bbox-fit framing. All
-        three are optional and independent — if only some are passed,
+        three are optional and independent - if only some are passed,
         the rest still come from bbox-fit. This is the WYSIWYG knob: the
         export panel exposes these so users can match what they're looking
         at on the live map.
@@ -3588,7 +3631,7 @@ def build_publication_map_figure(fig_map, *, location, occupancy, target_year,
     sb_x1_paper = sb_x0_paper + bar_paper_w
     sb_y_paper = 0.06   # 6% up from the bottom (above the credits footer)
 
-    # Tick whisker height — fixed pixels, converted to paper-y units
+    # Tick whisker height - fixed pixels, converted to paper-y units
     tick_h_paper_y = 8.0 / height_px
 
     # Halo rectangle (light bg behind the bar so it pops on busy basemaps)
@@ -3621,7 +3664,7 @@ def build_publication_map_figure(fig_map, *, location, occupancy, target_year,
              line=dict(color="black", width=4),
              layer="above"),
     ]
-    # Mapbox-layer scale bar removed — keeping mapbox.layers empty so the
+    # Mapbox-layer scale bar removed - keeping mapbox.layers empty so the
     # bar renders identically regardless of basemap choice.
     mapbox_layers = []
 
@@ -3642,7 +3685,7 @@ def build_publication_map_figure(fig_map, *, location, occupancy, target_year,
         mapbox_layers = [_ESRI_WORLD_IMAGERY_LAYER]
 
     # ----- Title and footer in paper coordinates -----
-    title_main = f"Building-level Flood Risk — {location}"
+    title_main = f"Building-level Flood Risk - {location}"
     if occupancy and occupancy != "All":
         title_main += f" ({occupancy})"
     title_sub = (f"Year {target_year}  •  {scenario_label}  •  "
@@ -3660,7 +3703,7 @@ def build_publication_map_figure(fig_map, *, location, occupancy, target_year,
         footer_parts.append(f"Basemap: {attrib}")
     footer_parts.append(f"Generated {today}")
     footer_lines = [
-        ("ADAPT — Assessment of Damage and Adaptation Planning Tool   |   "
+        ("ADAPT - Assessment of Damage and Adaptation Planning Tool   |   "
          "Center for Climate Systems Research, The Climate School, Columbia University"),
         "  •  ".join(footer_parts),
     ]
@@ -3690,7 +3733,7 @@ def build_publication_map_figure(fig_map, *, location, occupancy, target_year,
              x=0.5, y=-0.062, xanchor="center", yanchor="top",
              showarrow=False,
              font=dict(family="Arial", size=11, color="#64748b")),
-        # Scale-bar label — centered above the bar at its midpoint
+        # Scale-bar label - centered above the bar at its midpoint
         dict(text=f"<b>{scale_label}</b>",
              xref="paper", yref="paper",
              x=(sb_x0_paper + sb_x1_paper) / 2,
@@ -3698,7 +3741,7 @@ def build_publication_map_figure(fig_map, *, location, occupancy, target_year,
              xanchor="center", yanchor="bottom",
              showarrow=False,
              font=dict(family="Arial", size=14, color="#0f172a")),
-        # North arrow — paper-coord glyph in the upper-right corner
+        # North arrow - paper-coord glyph in the upper-right corner
         dict(text="<b>N</b><br>▲",
              xref="paper", yref="paper",
              x=0.96, y=0.96, xanchor="center", yanchor="top",
@@ -3709,7 +3752,7 @@ def build_publication_map_figure(fig_map, *, location, occupancy, target_year,
              font=dict(family="Arial Black", size=18, color="#0f172a")),
     ]
 
-    # Existing legend — move it to a less-cluttered corner if possible,
+    # Existing legend - move it to a less-cluttered corner if possible,
     # and tighten its background so it reads well in print.
     legend_cfg = dict(
         yanchor="bottom", y=0.05, xanchor="right", x=0.98,
@@ -3839,9 +3882,9 @@ def build_box_whisker_panel(group_labels, scenario_data, panel_title="",
     scenario_data : dict[slr_key -> list[tuple or None]]
         Per-group statistics for each SLR scenario. Use ``None`` for
         missing groups. Each tuple is one of:
-          * ``(p05, p50, p95)`` — 3-tuple. Q1/Q3 are estimated by
+          * ``(p05, p50, p95)`` - 3-tuple. Q1/Q3 are estimated by
             linear-CDF interpolation between the supplied bounds.
-          * ``(p05, p25, p50, p75, p95)`` — 5-tuple. Q1 and Q3 are taken
+          * ``(p05, p25, p50, p75, p95)`` - 5-tuple. Q1 and Q3 are taken
             **directly** from the supplied stored P25/P75 values, which is
             the preferred path when the workbook already contains them
             (the ALL format does). This eliminates the small bias that
@@ -3901,7 +3944,7 @@ def build_box_whisker_panel(group_labels, scenario_data, panel_title="",
         for gi, stats in enumerate(scenario_data[slr_key]):
             if stats is None:
                 continue
-            # Two accepted shapes — see the docstring above.
+            # Two accepted shapes - see the docstring above.
             if len(stats) == 5:
                 p05, p25, p50, p75, p95 = stats
                 q1, q3 = p25, p75
@@ -3915,7 +3958,7 @@ def build_box_whisker_panel(group_labels, scenario_data, panel_title="",
                 q1 = p05 + _q1_frac * (p50 - p05)
                 q3 = p50 + _q3_frac * (p95 - p50)
             else:
-                # Unrecognized shape — skip rather than crash.
+                # Unrecognized shape - skip rather than crash.
                 continue
 
             x_center = gi + offset_sign * BOX_HALF_OFFSET
@@ -3937,7 +3980,7 @@ def build_box_whisker_panel(group_labels, scenario_data, panel_title="",
 
         fig.add_trace(go.Box(
             name=slr_label,
-            x=x_num,                        # NUMERIC x — exact positions
+            x=x_num,                        # NUMERIC x - exact positions
             q1=q1_arr,
             median=p50_arr,
             q3=q3_arr,
@@ -3962,7 +4005,7 @@ def build_box_whisker_panel(group_labels, scenario_data, panel_title="",
         # Overlay an explicit "$0" marker for any box that collapses to zero
         # across all five summary stats. Plotly draws nothing visible when
         # q1=q3=median=lower=upper=0, which makes a true-zero strategy look
-        # missing — but the message we want is "this strategy reduces damage
+        # missing - but the message we want is "this strategy reduces damage
         # to zero," not "no data." The overlay is a small filled diamond
         # placed right at zero, in the same line color as the box, with a
         # hover that confirms the zero reading.
@@ -3998,7 +4041,7 @@ def build_box_whisker_panel(group_labels, scenario_data, panel_title="",
     y_floor = y_min * 1.15 if y_min < 0 else 0
     label_gap = y_span * 0.025       # small vertical gap above each line/whisker
 
-    # Annotations: every label sits directly above its reference line —
+    # Annotations: every label sits directly above its reference line -
     #   * Median label sits just above the median line (yanchor='bottom')
     #   * P95 label sits just above the upper whisker
     # The lower whisker (P05) is intentionally NOT labeled.
@@ -4006,7 +4049,7 @@ def build_box_whisker_panel(group_labels, scenario_data, panel_title="",
     # drift away from their own box regardless of plot width.
     for x_center, p05_v, p50_v, p95_v, line_clr in annot_records:
         med_text = fmt_money_rounded(p50_v) if abs(p50_v) >= label_zero_thresh else "$0"
-        # Median — bold colored text on a semi-transparent white pill,
+        # Median - bold colored text on a semi-transparent white pill,
         # placed just above the median line so it doesn't overlap it.
         fig.add_annotation(
             x=x_center, y=p50_v + label_gap,
@@ -4018,7 +4061,7 @@ def build_box_whisker_panel(group_labels, scenario_data, panel_title="",
             borderpad=2, bordercolor='rgba(0,0,0,0)',
         )
         if abs(p95_v) >= label_zero_thresh:
-            # P95 — bold colored text just above the upper whisker
+            # P95 - bold colored text just above the upper whisker
             fig.add_annotation(
                 x=x_center, y=p95_v + label_gap,
                 text=f"<b>{fmt_money_rounded(p95_v)}</b>",
@@ -4199,7 +4242,7 @@ def main():
 
     if available_locations:
         if "cv_location" not in ss:
-            ss.cv_location = "Pamunkey" if "Pamunkey" in available_locations else available_locations[0]
+            ss.cv_location = "Mastic Beach" if "Mastic Beach" in available_locations else available_locations[0]
         if ss.cv_location not in available_locations:
             ss.cv_location = available_locations[0]
         if "cv_mobile" not in ss:
@@ -4217,16 +4260,16 @@ def main():
                 '</div>',
                 unsafe_allow_html=True,
             )
-        # Global location selector — directly under the brand.
+        # Global location selector - directly under the brand.
         if available_locations:
             ss.w_location = ss.cv_location
             st.selectbox("\U0001f4cd Location", available_locations,
                          key="w_location", on_change=_cb_loc)
             ss.w_mobile = ss.cv_mobile
             st.checkbox(
-                "\U0001f3e0 Mobile-homes-dominated area", key="w_mobile", on_change=_cb_mobile,
+                "Mobile-homes-dominated area", key="w_mobile", on_change=_cb_mobile,
                 help="When on, the adaptation analysis for this area considers only raising "
-                     "(elevating) homes — the realistic retrofit for manufactured/mobile housing — "
+                     "(elevating) homes - the realistic retrofit for manufactured/mobile housing - "
                      "and compares it against the no-mitigation baseline. The Overview, "
                      "Distributions, and the map's Adaptation-Effectiveness view reflect this; "
                      "the integrated baseline results are still shown for comparison. Default on "
@@ -4439,7 +4482,7 @@ def main():
     if selected_location:
         page_title = f"Building-level flood damage assessment for {selected_location}"
         if selected_occupancy != "All":
-            page_title += f" \u2014 {selected_occupancy}"
+            page_title += f" - {selected_occupancy}"
     else:
         page_title = "Building-level flood damage assessment under climate change scenarios"
     st.markdown(
@@ -4529,13 +4572,13 @@ def main():
             "of the Pamunkey River near West Point, Virginia, ringed by river and tidal marsh on "
             "three sides. It faces compounding flood pressure from tidal and storm flooding, "
             "stormwater, and land subsidence, with NOAA projecting roughly 3–6 ft of sea-level "
-            "rise by 2100 — risk that led the National Trust to name it one of the 11 Most "
+            "rise by 2100 - risk that led the National Trust to name it one of the 11 Most "
             "Endangered Historic Places of 2025."
         ),
         "West Point": (
             "West Point, Virginia occupies a low, flat point at the confluence of the Mattaponi "
             "and Pamunkey rivers (which join to form the York River) in the tidal Chesapeake Bay "
-            "region — among the fastest sea-level-rise rates on the U.S. East Coast, where land "
+            "region - among the fastest sea-level-rise rates on the U.S. East Coast, where land "
             "subsidence compounds tidal and storm-surge flooding."
         ),
     }
@@ -4554,8 +4597,70 @@ def main():
                 return _v
         return _LOC_BLURB_DEFAULT
 
+    # ---- Per-page description: rendered once, directly below the page title
+    #      and above any per-page settings row (and, on the Overview, above the
+    #      location blurb). Each page's body no longer renders its own copy. ----
+    _PAGE_DESC = {
+        V_OVERVIEW: (
+            '<p class="tab-description">Aggregated community-wide damage statistics '
+            'comparing all adaptation strategies, separated by buildings Under DFE and '
+            'Above DFE.</p>'
+        ),
+        V_MAP: (
+            '<p class="tab-description">Interactive map showing building-level flood risk. '
+            'Use the <b>Map View</b> selector to switch between damage intensity, adaptation '
+            'effectiveness, binned damage, and per-building <b>flood occurrences</b> (how often '
+            'each home floods through a chosen horizon). Hover any building for details.</p>'
+        ),
+        V_FLOOD: (
+            '<p class="tab-description">Bathtub flood-inundation maps for water levels you specify. '
+            'Enter present-day flood levels (ft NAVD88); the app adds projected sea-level rise for each '
+            'planning horizon and maps the resulting inundation depth. Terrain is the USGS 3DEP 1/3 arc-second '
+            '(~10&nbsp;m) DEM, read on demand for this area only.</p>'
+        ),
+        V_ROADS: (
+            '<p class="tab-description">OpenStreetMap roads classified against the same bathtub flood levels '
+            'as the Flood Maps tab. Each road is sampled along its length, its ground elevation read from the '
+            'terrain, and every segment flagged <b style="color:#dc1414">flooded</b> (surface below the water '
+            'level), <b style="color:#8a2be2">inaccessible</b> (dry but cut off from the road network by flooding), or '
+            '<b style="color:#228b22">dry</b>.</p>'
+        ),
+        V_DIST: (
+            '<p class="tab-description">Distribution of cumulative damage <b>across individual buildings</b> '
+            'and counts of buildings by adaptation effectiveness. <b>Both SLR scenarios</b> are shown '
+            'side-by-side for the selected target year, regardless of the SLR Scenario chosen below. '
+            'For the community-aggregated distribution (community totals across Monte Carlo realizations), '
+            'see the Community Summary tab.</p>'
+        ),
+        V_NONRES: (
+            '<p class="tab-description">Flood depth at a single building. Pick a structure, enter the same '
+            'flood levels used in the map tabs, and the app reports the projected water level by year (with '
+            'sea-level rise) three ways: depth above the <b>ground</b>, depth above the <b>first floor</b>, '
+            'and the absolute <b>NAVD88</b> water surface. Positive = water above that reference; '
+            'negative = below it (no flooding).</p>'
+        ),
+        V_RES: (
+            '<p class="tab-description">Select an individual building to view detailed damage projections '
+            'across time horizons and compare adaptation options.</p>'
+        ),
+        V_NSI: (
+            '<p class="tab-description">National Structure Inventory (NSI) field-survey '
+            'tool - walk the map to add, verify, move, or flag buildings and record their '
+            'structural attributes. Edits sync to the shared Google Sheet backend.</p>'
+        ),
+        V_FRAG: (
+            '<p class="tab-description">Explore the FEMA/Hazus depth-damage (fragility) curves '
+            'behind the damage model. Pick an occupancy, flood zone, and basement condition, and '
+            'the tool overlays the structure- and content-damage curves for each number of stories '
+            'on one plot. The curves are read directly from the FAST tables shipped with the app. '
+            'In the example-building tabs, the building&#39;s own curve is highlighted.</p>'
+        ),
+    }
+    if active in _PAGE_DESC:
+        st.markdown(_PAGE_DESC[active], unsafe_allow_html=True)
+
     if active == V_OVERVIEW:
-        # Location flood-context blurb — shown above the settings row.
+        # Location flood-context blurb - shown above the settings row.
         st.markdown(
             '<div style="background:#eff6ff; border-left:4px solid #0ea5e9; '
             'border-radius:6px; padding:0.7rem 0.95rem; margin:0.1rem 0 0.9rem 0; '
@@ -4755,7 +4860,7 @@ def main():
             return
 
         def _occ_label(o):
-            return f"{o} \u2014 {_OCC_FULL[o]}" if o in _OCC_FULL else o
+            return f"{o} - {_OCC_FULL[o]}" if o in _OCC_FULL else o
 
         # Defaults / exact curve when embedded for a specific building.
         bld_occ = bld_zone = bld_base = None
@@ -4872,17 +4977,9 @@ def main():
         )
 
     # ========================================================================
-    # TAB: FLOOD MAPS — bathtub inundation for user-specified water levels
+    # TAB: FLOOD MAPS - bathtub inundation for user-specified water levels
     # ========================================================================
     if active == V_FLOOD:
-        st.markdown(
-            '<p class="tab-description">Bathtub flood-inundation maps for water levels you specify. '
-            'Enter present-day flood levels (ft NAVD88); the app adds projected sea-level rise for each '
-            'planning horizon and maps the resulting inundation depth. Terrain is the USGS 3DEP 1/3 arc-second '
-            '(~10&nbsp;m) DEM, read on demand for this area only.</p>',
-            unsafe_allow_html=True,
-        )
-
         _fl_ok = (selected_location in data_store and df_buildings is not None)
         _has_xy = (
             df_buildings is not None
@@ -4944,7 +5041,7 @@ def main():
                 )
 
             st.markdown(
-                f"**Present-day base levels** (ft NAVD88) — the same for both SLR scenarios; future "
+                f"**Present-day base levels** (ft NAVD88) - the same for both SLR scenarios; future "
                 f"levels add each scenario's sea-level rise. Tick the levels to map and edit any value. "
                 f"Annual / 10% / 1% are prefilled from the {_base_year} water-level percentiles where available."
             )
@@ -5104,9 +5201,9 @@ def main():
                                 _flood_km2 = _nflood * _cell_m2 / 1e6
                                 _note = (f"flooded ≈ {_flood_km2:.2f} km²" if _nflood > 0 else "no inundation")
                                 _tgt = _cols[_k % 2]
-                                # Title ABOVE the image (separate element — cannot overlap the figure).
+                                # Title ABOVE the image (separate element - cannot overlap the figure).
                                 _tgt.markdown(
-                                    f"**{_lbl} — {int(_yr)}**<br>"
+                                    f"**{_lbl} - {int(_yr)}**<br>"
                                     f"<span style='font-size:0.95rem;color:#374151'>"
                                     f"WL ≈ {_wl_ft:.2f} ft NAVD88 &nbsp;•&nbsp; {_note}</span>",
                                     unsafe_allow_html=True,
@@ -5118,21 +5215,13 @@ def main():
                     st.caption(
                         f"Bathtub model (no hydraulic connectivity); open water (Z ≤ 0) hidden. Terrain: "
                         f"USGS 3DEP 1/3 arc-second (~10 m), displayed at ~{_res_m:.0f} m. Basemap: "
-                        f"{_base_label} — © OpenStreetMap contributors / © CARTO."
+                        f"{_base_label} - © OpenStreetMap contributors / © CARTO."
                     )
 
     # ========================================================================
-    # TAB: FLOODED ROADS — OSM road network classified by inundation
+    # TAB: FLOODED ROADS - OSM road network classified by inundation
     # ========================================================================
     if active == V_ROADS:
-        st.markdown(
-            '<p class="tab-description">OpenStreetMap roads classified against the same bathtub flood levels '
-            'as the Flood Maps tab. Each road is sampled along its length, its ground elevation read from the '
-            'terrain, and every segment flagged <b style="color:#dc1414">flooded</b> (surface below the water '
-            'level), <b style="color:#8a2be2">inaccessible</b> (dry but cut off from the road network by flooding), or '
-            '<b style="color:#228b22">dry</b>.</p>',
-            unsafe_allow_html=True,
-        )
 
         _rfl_ok = (selected_location in data_store and df_buildings is not None)
         _rhas_xy = (
@@ -5186,7 +5275,7 @@ def main():
             }
 
             st.markdown(
-                f"**Present-day base levels** (ft NAVD88) — the same inputs as the Flood Maps tab; future "
+                f"**Present-day base levels** (ft NAVD88) - the same inputs as the Flood Maps tab; future "
                 f"levels add each scenario's sea-level rise."
             )
 
@@ -5254,34 +5343,40 @@ def main():
                 "Standard": (10.0, 700), "Fine": (5.0, 1000), "Finer": (3.0, 1300),
             }[_rres_label]
             _rbase_label = _rcb.selectbox("Basemap", ["OSM (color)", "Light", "Dark"], index=0, key="rd_base")
-            _raccess_on = st.checkbox(
-                "Define \u201creachable\u201d from the largest connected network",
-                value=True, key="rd_access",
-                help="On (default): a dry road is flagged 'inaccessible' when flooding severs every dry "
-                     "route from it to the largest connected road cluster, which is treated as the "
-                     "mainland. Off: skip the reachability analysis entirely and color roads only as "
-                     "flooded vs dry (no 'inaccessible' category).",
-            )
+            # Reachability + entrance-gateway toggles on a single line. The
+            # entrance toggle only applies when reachability is on, so its
+            # column stays empty when reachability is off.
+            _rk1, _rk2 = st.columns(2)
+            with _rk1:
+                _raccess_on = st.checkbox(
+                    "Define \u201creachable\u201d from the largest connected network",
+                    value=True, key="rd_access",
+                    help="On (default): a dry road is flagged 'inaccessible' when flooding severs every dry "
+                         "route from it to the largest connected road cluster, which is treated as the "
+                         "mainland. Off: skip the reachability analysis entirely and color roads only as "
+                         "flooded vs dry (no 'inaccessible' category).",
+                )
             _rsource = "largest"
             _rentry_on = False
             _rentry_manual = ""
-            if _raccess_on:
-                _rentry_on = st.checkbox(
-                    "Keep the main entrance open as a guaranteed gateway", value=True, key="rd_entry",
-                    help="The site's main access road off the main road often floods first and would otherwise make "
-                         "the whole area read as inaccessible. With this on, that entrance is treated as a guaranteed "
-                         "gateway: it still shows as flooded, but it no longer cuts the area off — interior roads are "
-                         "still judged on their own flooding. The entrance is auto-detected from the building cluster "
-                         "and shown below the maps so you can verify it.",
-                )
-                if _rentry_on:
-                    _rentry_manual = st.text_input(
-                        "Entrance location override — lat, lon (optional)", value="", key="rd_entry_xy",
-                        placeholder="auto-detect (leave blank)",
-                        help="Leave blank to auto-detect the entrance from the building cluster. If the detected "
-                             "point shown below the maps isn't the right road, pin it by pasting the entrance "
-                             "coordinate here in the same 'lat, lon' order shown there (e.g. 37.5554, -76.8361).",
+            with _rk2:
+                if _raccess_on:
+                    _rentry_on = st.checkbox(
+                        "Keep the main entrance open as a guaranteed gateway", value=True, key="rd_entry",
+                        help="The site's main access road off the main road often floods first and would otherwise make "
+                             "the whole area read as inaccessible. With this on, that entrance is treated as a guaranteed "
+                             "gateway: it still shows as flooded, but it no longer cuts the area off - interior roads are "
+                             "still judged on their own flooding. The entrance is auto-detected from the building cluster "
+                             "and shown below the maps so you can verify it.",
                     )
+            if _raccess_on and _rentry_on:
+                _rentry_manual = st.text_input(
+                    "Entrance location override - lat, lon (optional)", value="", key="rd_entry_xy",
+                    placeholder="auto-detect (leave blank)",
+                    help="Leave blank to auto-detect the entrance from the building cluster. If the detected "
+                         "point shown below the maps isn't the right road, pin it by pasting the entrance "
+                         "coordinate here in the same 'lat, lon' order shown there (e.g. 37.5554, -76.8361).",
+                )
             st.caption(
                 "A road map is produced for every ticked level × horizon × scenario. Maps render as static "
                 "images. Roads come live from OpenStreetMap (Overpass) for the map area."
@@ -5327,7 +5422,7 @@ def main():
                         except Exception as _e:
                             st.error(
                                 "Could not download OSM roads from Overpass (needs internet at runtime; the "
-                                "public Overpass server may be busy — try again in a moment). %s" % _e
+                                "public Overpass server may be busy - try again in a moment). %s" % _e
                             )
 
                 if _Zm is not None and _ext is not None and _roads is not None:
@@ -5344,7 +5439,7 @@ def main():
                         '<span style="background:rgb(107,174,214);">&nbsp;&nbsp;</span>'
                         '<span style="background:rgb(33,113,181);">&nbsp;&nbsp;</span>'
                         '<span style="background:rgb(8,69,148);">&nbsp;&nbsp;</span>'
-                        '&nbsp; flood depth — light → dark blue = shallow → deep'
+                        '&nbsp; flood depth - light → dark blue = shallow → deep'
                         '</div>',
                         unsafe_allow_html=True,
                     )
@@ -5435,7 +5530,7 @@ def main():
                                             f"flooded {_cnt['pct_flood']:.0f}% · "
                                             f"dry {_cnt['pct_dry']:.0f}%")
                                     _tgt.markdown(
-                                        f"**{_lbl} — {int(_yr)}**<br>"
+                                        f"**{_lbl} - {int(_yr)}**<br>"
                                         f"<span style='font-size:0.95rem;color:#374151'>"
                                         f"WL ≈ {_wl:.2f} ft NAVD88 &nbsp;•&nbsp; "
                                         f"{_metric_line}</span>",
@@ -5466,18 +5561,9 @@ def main():
                         )
 
     # ========================================================================
-    # TAB: BUILDING DEPTH — flood depth at one building vs ground / FFE / NAVD88
+    # TAB: BUILDING DEPTH - flood depth at one building vs ground / FFE / NAVD88
     # ========================================================================
     if active == V_NONRES:
-        st.markdown(
-            '<p class="tab-description">Flood depth at a single building. Pick a structure, enter the same '
-            'flood levels used in the map tabs, and the app reports the projected water level by year (with '
-            'sea-level rise) three ways: depth above the <b>ground</b>, depth above the <b>first floor</b>, '
-            'and the absolute <b>NAVD88</b> water surface. Positive = water above that reference; '
-            'negative = below it (no flooding).</p>',
-            unsafe_allow_html=True,
-        )
-
         _bd_attrs = loc_entry.get('bldg_attrs') if loc_entry else None
         if _bd_attrs is None or _bd_attrs.empty:
             st.info("No building inventory (NSI) is available for this location.")
@@ -5493,9 +5579,9 @@ def main():
                 _addr = _r.get('address', '')
                 _lbl = f"{int(bid)}"
                 if isinstance(_occ, str) and _occ:
-                    _lbl += f" — {_occ}"
+                    _lbl += f" - {_occ}"
                 if isinstance(_addr, str) and _addr:
-                    _lbl += f" — {_addr}"
+                    _lbl += f" - {_addr}"
                 return _lbl
 
             _bd_default_id = 579513026
@@ -5581,7 +5667,7 @@ def main():
                     "rise (they will equal the present-day level you enter)."
                 )
 
-            st.markdown("**Flood levels** (ft NAVD88) — tick the conditions to include and edit any value.")
+            st.markdown("**Flood levels** (ft NAVD88) - tick the conditions to include and edit any value.")
             _bdrows = []
             for _lbl, _val, _on in _bddefs:
                 _c0, _c1 = st.columns([0.42, 0.58])
@@ -5601,7 +5687,7 @@ def main():
 
                 def _ftin(v):
                     if v is None or not np.isfinite(v):
-                        return "—"
+                        return "-"
                     return f"{v:.2f} ft ({v * 12:.1f} in)"
 
                 def _build_table(ref):
@@ -5622,7 +5708,7 @@ def main():
                     df.index.name = "Flood condition"
                     return df
 
-                _scn_note = f" — {_bdscn_pretty(_bdscn)}" if _bdscn else ""
+                _scn_note = f" - {_bdscn_pretty(_bdscn)}" if _bdscn else ""
                 st.caption(
                     f"Columns are evaluation years; future years add the median sea-level rise{_scn_note} "
                     f"to the present-day ({_bdbase_year}) level."
@@ -5646,23 +5732,10 @@ def main():
                 st.caption("The projected still-water surface elevation itself (present-day level + sea-level rise).")
                 st.dataframe(_build_table('navd88'), use_container_width=True)
 
-                st.divider()
-                st.markdown("##### 📈 Fragility curves for this building")
-                render_fragility_curves(building_row=_brow, ctx="frag_nonres")
-
     # ========================================================================
-    # TAB: PER-BUILDING ANALYSIS — cross-building distributions + Plots 3/4/5
+    # TAB: PER-BUILDING ANALYSIS - cross-building distributions + Plots 3/4/5
     # ========================================================================
     if active == V_DIST:
-        st.markdown(
-            '<p class="tab-description">Distribution of cumulative damage <b>across individual buildings</b> '
-            'and counts of buildings by adaptation effectiveness. <b>Both SLR scenarios</b> are shown '
-            'side-by-side for the selected target year, regardless of the SLR Scenario chosen above. '
-            'For the community-aggregated distribution (community totals across Monte Carlo realizations), '
-            'see the Community Summary tab.</p>',
-            unsafe_allow_html=True
-        )
-        
         if df_buildings is None or df_buildings.empty:
             st.warning("No per-building data available for this location.")
         else:
@@ -5690,8 +5763,8 @@ def main():
                 st.warning(f"No per-building data for year {target_year}.")
             else:
                 st.subheader(
-                    f"Damage Distribution Across Buildings — {location_name} "
-                    f"({occupancy_label}) — Year {target_year}"
+                    f"Damage Distribution Across Buildings - {location_name} "
+                    f"({occupancy_label}) - Year {target_year}"
                 )
                 
                 # ----- Strategy ordering & labels -----
@@ -5779,7 +5852,7 @@ def main():
                         approximations between P05 and P95. The wider
                         5th/95th window (vs the earlier 10th/90th) surfaces
                         residual damage on Elevate that a tighter window
-                        would clip out — many buildings only see non-zero
+                        would clip out - many buildings only see non-zero
                         post-elevation damage in the upper tail of the
                         cross-building spread.
                         """
@@ -5798,7 +5871,7 @@ def main():
                                 p95 = float(np.percentile(vals, 95))
                                 # build_box_whisker_panel reads a 5-tuple as
                                 # (lower-whisker, Q1, median, Q3, upper-whisker)
-                                # — exactly the cross-building 5/25/50/75/95
+                                # - exactly the cross-building 5/25/50/75/95
                                 # we just computed. No interpolation needed.
                                 out[slr_key].append((p05, p25, p50, p75, p95))
                         return out
@@ -5848,14 +5921,14 @@ def main():
                 st.divider()
                 
                 # =============================================================
-                # PLOTS 3, 4, 5 — Per-building damage classification
+                # PLOTS 3, 4, 5 - Per-building damage classification
                 # Ported from VVV_Visualization_for_workshop_MasticBeach.py
                 # Uses per-building P90 as upper-tail proxy (matches the
                 # workshop convention; P95 was tested earlier but the user
                 # asked for P90 because it's less sensitive to the tail's
                 # smallest realizations and reads more conservatively).
                 # =============================================================
-                st.subheader(f"Building Counts by Adaptation Effectiveness — Year {target_year}")
+                st.subheader(f"Building Counts by Adaptation Effectiveness - Year {target_year}")
                 
                 # Compute per-scenario stats (analog of compute_bldg_stats)
                 per_scen_stats = {}
@@ -5869,7 +5942,7 @@ def main():
                     d_wfpb_s   = ds[ds['Action'] == 'WFP B'].set_index('id')
                     d_elev_s   = ds[ds['Action'] == 'Elevate'].set_index('id')
                     # Raise Utilities only matters for the Pamunkey variant of
-                    # fig4 below — we still always compute it so the stats
+                    # fig4 below - we still always compute it so the stats
                     # dict has a stable schema across locations.
                     d_raiseu_s = ds[ds['Action'] == 'Raise Utilities'].set_index('id')
                     
@@ -5914,7 +5987,7 @@ def main():
                     # --- Elevation bucket: dominance rule (matches the Map) ---
                     # An "Elevation" building is one that is damaged at baseline,
                     # WFP Basement is NOT enough on its own, AND Elevation
-                    # strictly outperforms WFP Basement on P90 — i.e., elevation
+                    # strictly outperforms WFP Basement on P90 - i.e., elevation
                     # provides meaningful additional protection beyond WFP B.
                     # This replaces the earlier strict ≤$1k rule, which was too
                     # demanding under high MC realizations: most damaged
@@ -6136,10 +6209,10 @@ def main():
                             row = {
                                 'SLR Scenario':          s['label'],
                                 'Buildings':             f"{s['n_tot']:,}",
-                                'Damaged (P90 > $0)':    f"{s['n_sev_dmg']:,}  ({100*s['n_sev_dmg']/s['n_tot']:.1f}%)" if s['n_tot'] else "—",
-                                'Damaged (median > $0)': f"{s['n_p50_dmg']:,}  ({100*s['n_p50_dmg']/s['n_tot']:.1f}%)" if s['n_tot'] else "—",
+                                'Damaged (P90 > $0)':    f"{s['n_sev_dmg']:,}  ({100*s['n_sev_dmg']/s['n_tot']:.1f}%)" if s['n_tot'] else "-",
+                                'Damaged (median > $0)': f"{s['n_p50_dmg']:,}  ({100*s['n_p50_dmg']/s['n_tot']:.1f}%)" if s['n_tot'] else "-",
                                 'Raising the home eliminates P90':
-                                    f"{s['n_elev']:,}  ({100*s['n_elev']/nd:.1f}%)" if nd > 0 else "—",
+                                    f"{s['n_elev']:,}  ({100*s['n_elev']/nd:.1f}%)" if nd > 0 else "-",
                             }
                             tbl_rows.append(row)
                             continue
@@ -6155,13 +6228,13 @@ def main():
                         row = {
                             'SLR Scenario':              s['label'],
                             'Buildings':                 f"{s['n_tot']:,}",
-                            'Damaged (P90 > $0)':        f"{s['n_sev_dmg']:,}  ({100*s['n_sev_dmg']/s['n_tot']:.1f}%)" if s['n_tot'] else "—",
-                            'Damaged (median > $0)':     f"{s['n_p50_dmg']:,}  ({100*s['n_p50_dmg']/s['n_tot']:.1f}%)" if s['n_tot'] else "—",
-                            elim_col_label:              f"{elim_count:,}  ({100*elim_count/nd:.1f}%)" if nd > 0 else "—",
+                            'Damaged (P90 > $0)':        f"{s['n_sev_dmg']:,}  ({100*s['n_sev_dmg']/s['n_tot']:.1f}%)" if s['n_tot'] else "-",
+                            'Damaged (median > $0)':     f"{s['n_p50_dmg']:,}  ({100*s['n_p50_dmg']/s['n_tot']:.1f}%)" if s['n_tot'] else "-",
+                            elim_col_label:              f"{elim_count:,}  ({100*elim_count/nd:.1f}%)" if nd > 0 else "-",
                         }
                         if not only_above_dfe:
                             row['Elevation > WFP B (where WFP B fails)'] = (
-                                f"{s['n_elev']:,}  ({100*s['n_elev']/nd:.1f}%)" if nd > 0 else "—"
+                                f"{s['n_elev']:,}  ({100*s['n_elev']/nd:.1f}%)" if nd > 0 else "-"
                             )
                         tbl_rows.append(row)
                     if tbl_rows:
@@ -6188,7 +6261,7 @@ def main():
                             "damage, the share for which raising utilities above BFE+2 ft brings P90 "
                             "damage to ≤ $1k. The **Elevation chart** shows, among damaged buildings "
                             "where WFP Basement is **not** sufficient on its own, the share for which "
-                            "elevation strictly outperforms WFP Basement on P90 — i.e. elevation "
+                            "elevation strictly outperforms WFP Basement on P90 - i.e. elevation "
                             "provides meaningful additional protection beyond what basement "
                             "floodproofing achieves. This dominance rule matches the Map tab's "
                             "Adaptation Effectiveness classifier "
@@ -6204,7 +6277,7 @@ def main():
                             "damage, the share for which wet-floodproofing the basement brings P90 "
                             "damage to ≤ $1k. The **Elevation chart** shows, among damaged buildings "
                             "where WFP Basement is **not** sufficient on its own, the share for which "
-                            "elevation strictly outperforms WFP Basement on P90 — i.e. elevation "
+                            "elevation strictly outperforms WFP Basement on P90 - i.e. elevation "
                             "provides meaningful additional protection beyond what basement "
                             "floodproofing achieves. This dominance rule matches the Map tab's "
                             "Adaptation Effectiveness classifier "
@@ -6216,14 +6289,6 @@ def main():
     # TAB 2: BUILDING MAP
     # ========================================================================
     if active == V_MAP:
-        st.markdown(
-            '<p class="tab-description">Interactive map showing building-level flood risk. '
-            'Use the <b>Map View</b> selector to switch between damage intensity, adaptation '
-            'effectiveness, binned damage, and per-building <b>flood occurrences</b> (how often '
-            'each home floods through a chosen horizon). Hover any building for details.</p>',
-            unsafe_allow_html=True
-        )
-        
         # The map requires per-building longitude/latitude. The bundle
         # format guarantees these columns are present (they live in
         # bldg_lookup.csv). The guard remains as a safety net for any
@@ -6237,11 +6302,11 @@ def main():
 
         if df_buildings is not None and not _has_coords:
             st.info(
-                "🗺️ Map view is unavailable for this dataset — building "
+                "🗺️ Map view is unavailable for this dataset - building "
                 "coordinates are missing. All other tabs remain fully functional."
             )
         elif df_buildings is not None:
-            st.subheader(f"Building Risk Map — {location_name} ({occupancy_label}) — {target_year}, {scenario}")
+            st.subheader(f"Building Risk Map - {location_name} ({occupancy_label}) - {target_year}, {scenario}")
 
             # Map View and Basemap on a single line, side by side.
             _mv_col, _bm_col = st.columns(2)
@@ -6269,7 +6334,7 @@ def main():
                     key="map_basemap_choice",
                     help=(
                         "**Streets**: OpenStreetMap road network and place labels. "
-                        "**Aerial**: satellite imagery (ESRI World Imagery) — useful for "
+                        "**Aerial**: satellite imagery (ESRI World Imagery) - useful for "
                         "spotting individual buildings, parking lots, vegetation, and "
                         "shoreline detail. Requires internet access at render time; if "
                         "the tile server is unreachable the map will fall back to a "
@@ -6277,7 +6342,7 @@ def main():
                     ),
                 )
 
-            # Flood Occurrences view — choose which statistic of the
+            # Flood Occurrences view - choose which statistic of the
             # per-building MC occurrence-count distribution drives the map
             # color (mean / low / median / high). Defaults to the mean
             # (rounded up). Always defined (defaults to the mean) so
@@ -6292,7 +6357,7 @@ def main():
                     help=(
                         "For each building we count, in every MC realization, how many "
                         "times it floods (annual-max water level above its first-floor "
-                        "elevation) from 2025 through the selected horizon — giving 1,000 "
+                        "elevation) from 2025 through the selected horizon - giving 1,000 "
                         "occurrence counts per building. This selector picks which "
                         "statistic of that distribution colors the map. The mean "
                         "(default) is the average count across the 1,000 realizations, "
@@ -6306,45 +6371,31 @@ def main():
                     "P90 (high)":     'occ_P90',
                 }[_fp_label]
 
-            # Map data filters (kept with the map rather than in the title
-            # settings row). Bound to the same committed keys the pipeline
-            # reads, so changes apply to the map immediately.
-            _df_col, _sz_col = st.columns([3, 2])
-            with _df_col:
+            # Map data filters + building search + point size, consolidated
+            # onto a SINGLE row so all four map controls sit on one line.
+            # Bound to the same committed keys the pipeline reads, so changes
+            # apply to the map immediately. The building-ID search drops a
+            # temporary highlight ring on the map that auto-expires after a few
+            # seconds (HIGHLIGHT_TTL_SEC) so a clean screenshot can be taken;
+            # "✖ Clear" dismisses it instantly. The checkbox and the Find/Clear
+            # buttons get a small spacer above them so they line up with the
+            # baseline of the labeled widgets on either side.
+            HIGHLIGHT_TTL_SEC = 8.0
+            # Pamunkey defaults to 2× point size because its small building
+            # count makes the default markers read as tiny dots at the natural
+            # map zoom; other locations default to 1×. Each location remembers
+            # its own setting via a location-scoped slider key.
+            _default_scale = 2.0 if location_name == "Pamunkey" else 1.0
+            c_dfe, c_zero, c_find, c_btn, c_size = st.columns([2.6, 1.9, 2.4, 1.7, 2.4])
+            with c_dfe:
                 if fp_options:
                     ss.w_dfe = ss.cv_dfe
                     st.multiselect("DFE status filter", fp_options, key="w_dfe", on_change=_cb_dfe)
-            with _sz_col:
+            with c_zero:
+                st.markdown("<div style='height:2.05em'></div>", unsafe_allow_html=True)
                 ss.w_showzero = ss.cv_showzero
                 st.checkbox("Show buildings with $0 damage", key="w_showzero", on_change=_cb_zero)
-            
-            # ----------------------------------------------------------
-            # Building-ID search — drops a temporary highlight ring on
-            # the map. The ring is plotted from the same figure as the
-            # rest of the markers (so it survives pan/zoom and exports
-            # correctly), but it auto-expires after a few seconds so the
-            # user can take a clean screenshot without manually undoing
-            # anything. Implementation:
-            #   * The search input writes (building_id, timestamp) to
-            #     session state.
-            #   * Each time the map renders, we check whether the
-            #     timestamp is still "fresh" (within HIGHLIGHT_TTL_SEC).
-            #     If it is, we add the ring trace; if it isn't, we don't.
-            #   * A small "Clear" button next to the input lets the user
-            #     dismiss the ring instantly without waiting for the TTL.
-            #   * Streamlit re-renders any time the user interacts with
-            #     the page (zoom, pan, scroll, etc.), and on each
-            #     re-render the TTL check runs again — so the ring
-            #     disappears on its own without any explicit timer.
-            HIGHLIGHT_TTL_SEC = 8.0
-            # Four columns: text input | Find+Clear buttons | Point-size slider
-            # | spacer. The buttons themselves are made shorter (less vertical
-            # padding) via the global `.stButton > button` CSS rule at the top
-            # of the file — that's how we get a compact button row WITHOUT
-            # squashing the labels onto two lines. Width here is just wide
-            # enough that "🔍 Find" and "✖ Clear" each fit on a single line.
-            search_col1, search_col2, search_col3, search_col4 = st.columns([3, 2, 3, 2])
-            with search_col1:
+            with c_find:
                 search_id_text = st.text_input(
                     "Find building by ID",
                     value="",
@@ -6354,16 +6405,11 @@ def main():
                         "Enter a Building ID and press Enter (or click 🔍). "
                         f"A magenta ring will flash on that building for "
                         f"~{int(HIGHLIGHT_TTL_SEC)} seconds, then disappear "
-                        "automatically — no extra marks left on the map for "
+                        "automatically - no extra marks left on the map for "
                         "screenshots. Click ✖ to clear immediately."
                     ),
                 )
-            with search_col2:
-                # Spacer above the buttons so they vertically line up with
-                # the text input baseline (Streamlit reserves label space
-                # above the input). Slightly larger than the original 1.85em
-                # because the buttons are now shorter (compact CSS rule), so
-                # they need to be pushed down a hair further to stay flush.
+            with c_btn:
                 st.markdown("<div style='height:2.05em'></div>", unsafe_allow_html=True)
                 btn_a, btn_b = st.columns(2)
                 with btn_a:
@@ -6372,14 +6418,7 @@ def main():
                 with btn_b:
                     clear_clicked = st.button("✖ Clear", key="map_search_clear",
                                               use_container_width=True)
-            with search_col3:
-                # Point-size slider. Each location remembers its own setting
-                # via a location-scoped key, so switching study sites doesn't
-                # carry Pamunkey's bumped-up size over to Mastic Beach (and
-                # vice versa). Pamunkey defaults to 2× because its small
-                # building count makes the default markers read as tiny dots
-                # at the natural map zoom; other locations default to 1×.
-                _default_scale = 2.0 if location_name == "Pamunkey" else 1.0
+            with c_size:
                 _point_scale = st.slider(
                     "Point size",
                     min_value=0.5, max_value=4.0,
@@ -6392,9 +6431,6 @@ def main():
                         "where the default dots look small at the natural zoom."
                     ),
                 )
-            with search_col4:
-                # Spacer column; deliberately empty.
-                pass
             
             # Resolve the click → session-state interaction
             import time as _time_mod
@@ -6411,7 +6447,7 @@ def main():
                 # Try to coerce the user's input to the same dtype as the
                 # 'id' column. The bundle stores ids as ints, but a user
                 # might paste them with whitespace, leading zeros, or a
-                # stray decimal point — be forgiving.
+                # stray decimal point - be forgiving.
                 raw = search_id_text.strip()
                 try:
                     bid_target = int(float(raw))
@@ -6464,7 +6500,7 @@ def main():
                     df_map = df_map[df_map['DFE_Status'].isin(dfe_filter)]
                 
                 # ----------------------------------------------------------
-                # "Hide $0-damage buildings" — pick the right damage metric
+                # "Hide $0-damage buildings" - pick the right damage metric
                 # ----------------------------------------------------------
                 # The hide filter must look at the SAME statistic the active
                 # map view colors by, otherwise we hide buildings the user
@@ -6474,7 +6510,7 @@ def main():
                 #   * Adaptation Effective. → P90 (categories are P90-based)
                 # In particular, for the bins/effectiveness views, hiding by
                 # P50 silently drops every building with P50 = 0 but
-                # P90 > $1k — the very buildings that drive tail-risk
+                # P90 > $1k - the very buildings that drive tail-risk
                 # planning.
                 if map_view == "Flood Occurrences":
                     # Flood view shows ALL buildings (a building that never
@@ -6484,7 +6520,7 @@ def main():
                 elif map_view == "Damage Heatmap":
                     zero_filter_col = 'No mitigation_P50' if 'No mitigation_P50' in df_map.columns else None
                 else:
-                    # Upper-tail view — fall back to P50 only if P90 isn't loaded
+                    # Upper-tail view - fall back to P50 only if P90 isn't loaded
                     zero_filter_col = (
                         'No mitigation_P90' if 'No mitigation_P90' in df_map.columns
                         else 'No mitigation_P50' if 'No mitigation_P50' in df_map.columns
@@ -6615,7 +6651,7 @@ def main():
                             _no_mit_shown_inline = False
 
                         # Mobile/manufactured homes (RES2) have only one realistic
-                        # retrofit — raising (elevating) the whole home — so their
+                        # retrofit - raising (elevating) the whole home - so their
                         # hover lists just Elevate (+ the No-Mitigation baseline).
                         # Any non-RES2 home (RES1, RES3, RES4, …) shows every
                         # applicable option. This is decided per building from its
@@ -6627,7 +6663,7 @@ def main():
                         # Wet-floodproofing the FIRST floor only makes sense for
                         # multi-story buildings (you retreat upstairs). For a
                         # single-story building it would mean floodproofing the
-                        # whole living space, so we hide that line from the hover —
+                        # whole living space, so we hide that line from the hover -
                         # mirroring the building-detail cards. NaN stories => hide.
                         _row_nstory = row.get('number_of_stories')
                         _row_one_story = pd.isna(_row_nstory) or float(_row_nstory) <= 1
@@ -6644,7 +6680,7 @@ def main():
                                 continue
 
                             # Single-story buildings: wet-floodproofing the first
-                            # floor is not an applicable strategy — hide the line.
+                            # floor is not an applicable strategy - hide the line.
                             if action_name == 'WFP 1st' and _row_one_story:
                                 continue
 
@@ -6739,7 +6775,7 @@ def main():
                     # =====================================================
                     # Helper: ring a small set of specific Tribal buildings
                     # beneath any colored category trace. Only the IDs in
-                    # _HIGHLIGHT_RING_IDS are ringed, and only for Pamunkey —
+                    # _HIGHLIGHT_RING_IDS are ringed, and only for Pamunkey -
                     # every other building (residential or not) is left
                     # unringed. (Replaces the old non-residential ring.)
                     # =====================================================
@@ -6781,7 +6817,7 @@ def main():
                     _flood_occ_df = None    # populated by the Flood Occurrences view
                     
                     # =====================================================
-                    # VIEW 1 — Damage Heatmap (existing; continuous color)
+                    # VIEW 1 - Damage Heatmap (existing; continuous color)
                     # =====================================================
                     if map_view == "Damage Heatmap":
                         if baseline_col:
@@ -6841,13 +6877,13 @@ def main():
                         _add_highlight_ring_legend(fig_map)
 
                     # =====================================================
-                    # VIEW 2 — Adaptation Effectiveness (4 categories)
+                    # VIEW 2 - Adaptation Effectiveness (4 categories)
                     # Ported from generate_action_animation.m
                     # Uses upper-tail (P95) cumulative damage as a proxy
                     # for the MATLAB script's P90.
                     # =====================================================
                     elif map_view == "Adaptation Effectiveness":
-                        # Required columns — P90 is the upper-tail proxy
+                        # Required columns - P90 is the upper-tail proxy
                         # (matches the Distributions tab and the workshop
                         # convention).
                         #
@@ -6865,7 +6901,7 @@ def main():
                         # home dominated (e.g. Mastic Beach), where it was
                         # previously ignored in favour of WFP Basement. At
                         # Pamunkey, WFP B is absent (dropped upstream), so only
-                        # Raise Utilities contributes there — behaviour unchanged.
+                        # Raise Utilities contributes there - behaviour unchanged.
                         col_nomit = 'No mitigation_P90'
                         col_elev  = 'Elevate_P90'
                         _cheap_specs = [
@@ -6884,9 +6920,9 @@ def main():
 
                         # No mitigation + Elevate are hard-required; the cheap
                         # retrofit (yellow bucket) is optional. When neither cheap
-                        # column is present — e.g. an inventory that is entirely
+                        # column is present - e.g. an inventory that is entirely
                         # RES2 manufactured housing, where Raise Utilities was
-                        # dropped at the data layer — the yellow bucket is simply
+                        # dropped at the data layer - the yellow bucket is simply
                         # skipped rather than erroring the whole view.
                         _core_cols = (col_nomit, col_elev)
                         missing = [c for c in _core_cols if c not in df_map.columns]
@@ -6934,7 +6970,7 @@ def main():
                             #                     DOES bring P90 ≤ thr
                             #   4 = Residual      Under-DFE, damaged, neither
                             #                     retrofit (cheap nor elevation)
-                            #                     brings P90 ≤ thr — even the
+                            #                     brings P90 ≤ thr - even the
                             #                     strongest adaptation in scope
                             #                     leaves residual damage, so the
                             #                     conversation has to move to
@@ -6943,7 +6979,7 @@ def main():
                             #   5 = Out of scope  Above-DFE buildings that fall
                             #                     through (their retrofit options
                             #                     are different from those in the
-                            #                     three-bucket pyramid above —
+                            #                     three-bucket pyramid above -
                             #                     e.g., WFP 1st Floor, dry
                             #                     floodproofing, content-only).
                             #                     Not plotted on this view, since
@@ -6967,7 +7003,7 @@ def main():
                             elev_to_thr = elev <= thr
 
                             # Under-DFE membership mask (Above-DFE buildings
-                            # are NEVER classified as Residual — they fall
+                            # are NEVER classified as Residual - they fall
                             # through to cat=5 / omitted instead).
                             if 'DFE_Status' in df_map.columns:
                                 _dfe_lower = (df_map['DFE_Status']
@@ -6988,7 +7024,7 @@ def main():
 
                             df_map['_cat_action'] = cat
 
-                            # Legend counts — each building appears in exactly
+                            # Legend counts - each building appears in exactly
                             # one bucket, so these add up to (buildings shown).
                             n_no_damage  = int((cat == 1).sum())
                             n_wfpb_works = int((cat == 2).sum())
@@ -7024,7 +7060,7 @@ def main():
                                 # appears in only one color.
                                 legend_count = cat_legend_counts.get(ci, len(df_c))
                                 if len(df_c) == 0:
-                                    # No markers in this priority bucket — still
+                                    # No markers in this priority bucket - still
                                     # show a legend stub with the independent count.
                                     fig_map.add_trace(go.Scattermapbox(
                                         lat=[None], lon=[None],
@@ -7046,7 +7082,7 @@ def main():
                             _add_highlight_ring_legend(fig_map)
 
                     # =====================================================
-                    # VIEW 3 — Damage Bins (5 categories with dynamic breaks)
+                    # VIEW 3 - Damage Bins (5 categories with dynamic breaks)
                     # Ported from generate_damage_animation_v3.m
                     # =====================================================
                     elif map_view == "Damage Bins":
@@ -7096,7 +7132,7 @@ def main():
                                 breaks = compute_damage_bin_breaks(df_buildings, scenario)
                                 if not breaks:
                                     # Degenerate case (no nonzero damages anywhere
-                                    # in this SLR scenario) — fall back to the
+                                    # in this SLR scenario) - fall back to the
                                     # current year's data
                                     raw_breaks = np.quantile(nonzero, [0.20, 0.40, 0.60, 0.80])
                                     breaks = sorted({nice_round_up(v) for v in raw_breaks if v > 0})[:4]
@@ -7169,7 +7205,7 @@ def main():
                             _add_highlight_ring_legend(fig_map)
                     
                     # =====================================================
-                    # VIEW 4 — Flood Occurrences (MC exceedance of FFE)
+                    # VIEW 4 - Flood Occurrences (MC exceedance of FFE)
                     # For each building, count per MC realization how many
                     # years (2025 → horizon) the annual-maximum water level
                     # exceeds its first-floor elevation, then color by a
@@ -7249,7 +7285,7 @@ def main():
                                         _h += f"FFE {float(_ffe_v):.2f} ft NAVD88<br>"
                                     _h += (f"Floods <b>{_r.occ_show:.0f}</b> of {n_years_win} times "
                                            f"by {int(target_year)} ({_pct_word} MC)<br>")
-                                    _h += (f"<span style='color:#64748b'>MC spread — "
+                                    _h += (f"<span style='color:#64748b'>MC spread - "
                                            f"mean {_r.occ_mean:.1f} · "
                                            f"P10 {_r.occ_P10:.0f} · P50 {_r.occ_P50:.0f} · "
                                            f"P90 {_r.occ_P90:.0f} times</span>")
@@ -7353,7 +7389,7 @@ def main():
                     #
                     # Streamlit doesn't rerun on a wall-clock timer, so we
                     # schedule a one-shot rerun right after the TTL using
-                    # st_autorefresh — without it, the ring would persist
+                    # st_autorefresh - without it, the ring would persist
                     # on screen until the user moved the mouse / resized
                     # the page, which defeats the "clean screenshot"
                     # goal.
@@ -7371,9 +7407,9 @@ def main():
                             _addr = _hl_row.get('address', pd.Series([None])).iloc[0]
                             _hl_label = (
                                 f"Building #{_hl_id}"
-                                + (f" — {_addr}" if pd.notna(_addr) and str(_addr).strip() else "")
+                                + (f" - {_addr}" if pd.notna(_addr) and str(_addr).strip() else "")
                             )
-                            # Outer halo — large translucent magenta circle
+                            # Outer halo - large translucent magenta circle
                             fig_map.add_trace(go.Scattermapbox(
                                 lat=[_hl_lat], lon=[_hl_lon],
                                 mode='markers',
@@ -7394,7 +7430,7 @@ def main():
                             # Schedule a single rerun ~200ms after the TTL
                             # so the ring auto-disappears without manual
                             # interaction. Falls back gracefully if the
-                            # st_autorefresh package isn't installed —
+                            # st_autorefresh package isn't installed -
                             # the ring still vanishes on the next user
                             # interaction (pan, zoom, click, etc.).
                             try:
@@ -7405,7 +7441,7 @@ def main():
                                     key=f"map_hl_expire_{_hl_id}_{int(_hl_until)}",
                                 )
                             except ImportError:
-                                # Optional dependency — silently skip the
+                                # Optional dependency - silently skip the
                                 # auto-clear. The user can hit "✖ Clear"
                                 # or trigger any UI event to clear it.
                                 pass
@@ -7437,7 +7473,7 @@ def main():
                     # the interaction to simple clicks (no lasso/box select), which also
                     # prevents Plotly from dimming unselected markers.
                     # The clicked building's id rides along in customdata[1] (set when
-                    # df_map['hover_data'] was built) — we extract it below.
+                    # df_map['hover_data'] was built) - we extract it below.
                     map_event = st.plotly_chart(
                         fig_map,
                         use_container_width=True,
@@ -7469,7 +7505,7 @@ def main():
                         if pts_nonempty:
                             p0 = pts[0]
                             cd = p0.get('customdata') if isinstance(p0, dict) else getattr(p0, 'customdata', None)
-                            # cd may be [text, id]  OR  [[text, id]] (nested) — unwrap as needed
+                            # cd may be [text, id]  OR  [[text, id]] (nested) - unwrap as needed
                             if isinstance(cd, (list, tuple)):
                                 if len(cd) >= 2 and not isinstance(cd[1], (list, tuple)):
                                     clicked_id = int(cd[1])
@@ -7481,7 +7517,7 @@ def main():
                     if clicked_id is not None:
                         st.session_state['selected_building_id'] = clicked_id
                     elif map_selection_seen and not pts_nonempty:
-                        # User clicked an empty area of the map — clear the
+                        # User clicked an empty area of the map - clear the
                         # selection everywhere (map caption, Building Details tab).
                         # NOTE: Plotly on Scattermapbox doesn't always emit an
                         # event for empty-area clicks, so this path is a
@@ -7494,7 +7530,7 @@ def main():
                         with col_sel:
                             st.caption(
                                 f"📍 **Selected building:** #{st.session_state['selected_building_id']} "
-                                "— open the **Details** tab to see its full profile."
+                                "- open the **Details** tab to see its full profile."
                             )
                         with col_btn:
                             if st.button("✖ Clear selection", key="clear_map_selection",
@@ -7528,9 +7564,9 @@ def main():
                                 "🏠 **Mobile-homes-dominated area:** only **raising (elevating) homes** "
                                 "is considered. Each building is colored by whether raising it eliminates "
                                 "its upper-tail (P90) cumulative damage under the selected year and SLR "
-                                "scenario: **No Damage** (baseline P90 ≤ $1k — no intervention needed) → "
+                                "scenario: **No Damage** (baseline P90 ≤ $1k - no intervention needed) → "
                                 "**Elevation** (raising the home brings P90 ≤ $1k) → **Residual Damage** "
-                                "(Under-DFE buildings where even raising the home leaves P90 above $1k — "
+                                "(Under-DFE buildings where even raising the home leaves P90 above $1k - "
                                 "the conversation has to move beyond retrofits, to buyout, relocation, or "
                                 "community-scale interventions). Above-DFE buildings not eliminated by "
                                 "raising are not plotted. Non-residential buildings are marked with a "
@@ -7538,7 +7574,7 @@ def main():
                             )
                         else:
                             # Caption mirrors the classifier: the yellow bucket is
-                            # whichever cheap retrofit(s) are present in the data —
+                            # whichever cheap retrofit(s) are present in the data -
                             # WFP Basement and/or Raise Utilities.
                             _cheap_lbl = cheap_retrofit_label
                             _desc_map = {
@@ -7553,17 +7589,17 @@ def main():
                                 "eliminates** its upper-tail (P90) cumulative damage under "
                                 "the selected year and SLR scenario. Buckets are checked in "
                                 "priority order: "
-                                "**No Damage** (baseline P90 ≤ $1k — no intervention needed) → "
+                                "**No Damage** (baseline P90 ≤ $1k - no intervention needed) → "
                                 f"**{_cheap_lbl}** ({_cheap_desc} brings P90 ≤ $1k) → "
                                 "**Elevation** (the cheap retrofit doesn't reach the threshold "
                                 "but elevation does) → "
                                 "**Residual Damage** (Under-DFE buildings where neither the "
-                                "cheap retrofit nor elevation can bring P90 ≤ $1k — "
+                                "cheap retrofit nor elevation can bring P90 ≤ $1k - "
                                 "the conversation has to move beyond retrofits, to buyout, "
                                 "relocation, or larger community-scale interventions). "
                                 "Above-DFE buildings whose damage isn't eliminated by the "
                                 "retrofits shown are not "
-                                "plotted on this view — their relevant adaptation options "
+                                "plotted on this view - their relevant adaptation options "
                                 "(wet floodproofing the first floor, content-only measures, "
                                 "etc.) aren't represented in the three-bucket pyramid above. "
                                 "Each building appears in exactly one color, and the legend "
@@ -7661,7 +7697,7 @@ def main():
                         # browser doesn't send the Referer header OSM's tile
                         # usage policy requires), so an OSM export consistently
                         # comes back peppered with "Access blocked" tiles.
-                        # The live map can still use OSM — your real browser
+                        # The live map can still use OSM - your real browser
                         # supplies the Referer there. For exports use Carto
                         # (which has no such restriction) or the white-bg
                         # option.
@@ -7680,12 +7716,12 @@ def main():
                                  "auto-fall-back to a white background. `carto-positron` "
                                  "(light, neutral) and `carto-darkmatter` (dark) are the "
                                  "preferred print styles. `Aerial` uses ESRI World "
-                                 "Imagery satellite tiles — great for showing physical "
+                                 "Imagery satellite tiles - great for showing physical "
                                  "context (shorelines, vegetation, building footprints) "
                                  "but heavier and lower-contrast in print. Pick "
                                  "`white-bg` for a guaranteed-working export with no "
                                  "roads/labels. OpenStreetMap is intentionally excluded "
-                                 "— its tile servers block headless render requests, so "
+                                 "- its tile servers block headless render requests, so "
                                  "OSM exports come back covered in 'Access blocked' tiles."
                         )
                         
@@ -7709,7 +7745,7 @@ def main():
                             key="map_export_frame_mode",
                             help="Auto-fit centers on the data bbox and chooses a zoom "
                                  "that shows everything. Custom lets you set the center "
-                                 "and zoom — useful when you've panned/zoomed in the live "
+                                 "and zoom - useful when you've panned/zoomed in the live "
                                  "map and want the export to match. (Streamlit doesn't "
                                  "expose the live map's current pan/zoom back to Python, "
                                  "so this is the most reliable way to get WYSIWYG.)"
@@ -7804,14 +7840,14 @@ def main():
                                 fname = (f"ADAPT_{_safe(location_name)}_{int(target_year)}_"
                                          f"{_scn_short}_{_safe(map_view)}_{_occ_short}.{ext}")
                                 st.success(
-                                    f"✅ Map ready — {ex_w}×{ex_h} px"
+                                    f"✅ Map ready - {ex_w}×{ex_h} px"
                                     f"{' (×' + str(int(export_scale)) + ')' if fmt == 'png' else ''}, "
                                     f"{len(img_bytes)/1024:.0f} KB"
                                 )
                                 if info == "basemap_fallback":
                                     st.warning(
                                         f"⚠ The chosen basemap (`{export_basemap_value}`) "
-                                        "couldn't be rendered — its tile server refused the "
+                                        "couldn't be rendered - its tile server refused the "
                                         "request from the headless browser. The export was "
                                         "generated on a clean white background instead. "
                                         "Try `carto-positron` or `white-bg` for a more "
@@ -7864,14 +7900,14 @@ def main():
             st.warning("No per-building data available for this location.")
         
         # --------------------------------------------------------------
-        # Data Notes — provenance / coverage information for the bundle
+        # Data Notes - provenance / coverage information for the bundle
         # --------------------------------------------------------------
         # Surfaced below the map so users have a one-click path to
         # check what's in the inventory, what got skipped, and which
         # hazard inputs the analysis used. The expander stays collapsed
         # by default to keep the main view clean.
         if loc_entry is not None:
-            with st.expander("ℹ️ Data Notes — coverage, exclusions, and bundle metadata", expanded=False):
+            with st.expander("ℹ️ Data Notes - coverage, exclusions, and bundle metadata", expanded=False):
                 meta = loc_entry.get('metadata') or {}
                 bfe_ft_local = loc_entry.get('bfe_ft')
                 
@@ -7898,7 +7934,7 @@ def main():
                         )
                         st.markdown(f"**Evaluation horizons**  \n{years_str}")
                 
-                # Skipped buildings table — only shown when there are any.
+                # Skipped buildings table - only shown when there are any.
                 if n_skipped > 0:
                     st.markdown("---")
                     st.markdown(f"**Excluded buildings ({n_skipped})**")
@@ -7916,7 +7952,7 @@ def main():
                         use_container_width=True, hide_index=True,
                     )
                 
-                # Bundle metadata — small, gray, for the technically curious.
+                # Bundle metadata - small, gray, for the technically curious.
                 if meta:
                     st.markdown("---")
                     st.caption("**Bundle metadata**")
@@ -7957,10 +7993,8 @@ def main():
     # TAB 1: COMMUNITY SUMMARY
     # ========================================================================
     if active == V_OVERVIEW:
-        st.markdown('<p class="tab-description">Aggregated community-wide damage statistics comparing all adaptation strategies, separated by buildings Under DFE and Above DFE.</p>', unsafe_allow_html=True)
-        
         if df_agg is not None:
-            st.subheader(f"Community-Wide Damage Summary — {location_name} ({occupancy_label}) — {target_year}, {scenario}")
+            st.subheader(f"Community-Wide Damage Summary - {location_name} ({occupancy_label}) - {target_year}, {scenario}")
             
             # In the community summary, hide the WFP First-floor strategy for
             # Pamunkey (manufactured-/single-story-dominant, so first-floor wet
@@ -8009,12 +8043,12 @@ def main():
             st.divider()
             
             # ================================================================
-            # AGGREGATED DAMAGE DISTRIBUTION — Both SLR scenarios side-by-side
+            # AGGREGATED DAMAGE DISTRIBUTION - Both SLR scenarios side-by-side
             # Box edges = Q1/Q3 (interpolated from CDF); whiskers = P05/P95;
             # white center line = P50. Boxes summarize the distribution of
             # COMMUNITY-TOTAL damage across Monte Carlo realizations.
             # ================================================================
-            st.subheader(f"Aggregated Damage Distribution — Year {target_year}")
+            st.subheader(f"Aggregated Damage Distribution - Year {target_year}")
             st.markdown(
                 f"<p style='color:#64748b;font-size:0.95rem;margin-top:-0.5rem;'>"
                 "Distribution of <b>community-total</b> cumulative damage across Monte Carlo "
@@ -8139,7 +8173,7 @@ def main():
                     "damage across Monte Carlo realizations. Box edges show the 25th and 75th "
                     "percentiles, the white center line is the median (P50), and whiskers extend "
                     "to the 5th and 95th percentiles. All five percentiles are taken directly "
-                    "from the aggregated Monte Carlo results stored in the workbook — no "
+                    "from the aggregated Monte Carlo results stored in the workbook - no "
                     "interpolation between bounds is performed. The reduction panel is computed "
                     "percentile-by-percentile against the same-scenario No-Mitigation baseline."
                 )
@@ -8189,7 +8223,7 @@ def main():
                         color_discrete_map={'No mitigation': '#ef4444', 'Raise Utilities': '#f97316',
                             'WFP B': '#eab308', 'Elevate': '#22c55e', 'WFP 1st': '#3b82f6'},
                         category_orders={'Action': dfe_action_order},
-                        title="Under DFE — All Strategies")
+                        title="Under DFE - All Strategies")
                     # Smart $k/$M/$B y-axis ticks
                     _u_max = df_under['Cumulative Damage ($)'].max()
                     u_ticks, u_labels = smart_money_ticks(_u_max, target_n=5)
@@ -8248,7 +8282,7 @@ def main():
                             color_discrete_map={'No mitigation': '#ef4444', 'Raise Utilities': '#f97316',
                                 'WFP B': '#eab308', 'WFP 1st': '#3b82f6'},
                             category_orders={'Action': dfe_action_order_above},
-                            title="Above DFE — Strategies (excl. Elevate)")
+                            title="Above DFE - Strategies (excl. Elevate)")
                         _a_max = df_above['Cumulative Damage ($)'].max()
                         a_ticks, a_labels = smart_money_ticks(_a_max, target_n=5)
                         fig_above.update_layout(
@@ -8306,7 +8340,7 @@ def main():
                     color='Strategy',
                     category_orders={'Strategy': traj_present},
                     markers=True, color_discrete_map=traj_color_map,
-                    title=f"Cumulative Damage Projection — {occupancy_label} ({scenario} SLR Scenario)",
+                    title=f"Cumulative Damage Projection - {occupancy_label} ({scenario} SLR Scenario)",
                 )
                 _l_max = df_timeline['Total_CumEAD_P50'].max()
                 l_ticks, l_labels = smart_money_ticks(_l_max, target_n=6)
@@ -8412,7 +8446,7 @@ def main():
                         
                         fig_bd.update_layout(
                             title=dict(
-                                text=(f"No-Mitigation Cumulative Damage by {group_label} — "
+                                text=(f"No-Mitigation Cumulative Damage by {group_label} - "
                                       f"{occupancy_label} ({target_year}, {scenario})"),
                                 x=0.02, xanchor='left', font=dict(size=15),
                             ),
@@ -8444,9 +8478,9 @@ def main():
             st.warning("No data available for this location.")
 
     # ========================================================================
-    # OVERVIEW — STRUCTURE-VALUE DISTRIBUTION BY BUILDING CATEGORY
+    # OVERVIEW - STRUCTURE-VALUE DISTRIBUTION BY BUILDING CATEGORY
     # Inventory view (independent of the page's occupancy filter): pick a
-    # building category — default RES2 (manufactured housing) — and see how
+    # building category - default RES2 (manufactured housing) - and see how
     # many buildings fall in each structure-value band. Band edges use a
     # "nice" round-number width (… 25k / 50k / 100k / 250k …) chosen from the
     # data range so the ranges read cleanly on the axis.
@@ -8572,10 +8606,8 @@ def main():
     # TAB 3: BUILDING DETAILS
     # ========================================================================
     if active == V_RES:
-        st.markdown('<p class="tab-description">Select an individual building to view detailed damage projections across time horizons and compare adaptation options.</p>', unsafe_allow_html=True)
-        
         if df_buildings is not None:
-            st.subheader(f"🏠 Individual Building Analysis — {location_name} ({occupancy_label})")
+            st.subheader(f"🏠 Individual Building Analysis - {location_name} ({occupancy_label})")
             
             building_ids = df_buildings['id'].unique()
             sorted_ids = sorted(building_ids)
@@ -8718,7 +8750,7 @@ def main():
                         else:
                             st.success(fp_status)
                 
-                # Building-type and SOID provenance row — small, gray,
+                # Building-type and SOID provenance row - small, gray,
                 # optional. Only renders when the bundle ships these fields.
                 provenance_bits = []
                 if pd.notna(building_info.get('building_type')):
@@ -8740,7 +8772,7 @@ def main():
                 # building, evaluated year-by-year under both SLR scenarios.
                 # We compute against the raw 1,000-realization MC sheets
                 # (water_levels[<slr>_mc]); when those aren't available we
-                # silently skip — no fallback to percentile interpolation
+                # silently skip - no fallback to percentile interpolation
                 # since those would be misleading for a binary threshold.
                 ffe_val = building_info.get('FFE_ft')
                 bfe_local = (loc_entry or {}).get('bfe_ft')
@@ -8815,7 +8847,7 @@ def main():
                                      use_container_width=True, hide_index=True)
                         st.caption(
                             "**P(WL ≥ FFE)** is the simulated annual exceedance "
-                            "probability for this building's first floor — a direct, "
+                            "probability for this building's first floor - a direct, "
                             "decision-relevant counterpart to the cumulative-damage "
                             "estimates below. Years and SLR trajectories use the "
                             "same MC realizations that fed the damage chain."
@@ -8856,7 +8888,7 @@ def main():
                         '50th-percentile': 'Median SLR (P50)',
                         '90th-percentile': 'High-End SLR (P90)',
                     }.get(scenario, scenario)
-                    st.subheader(f"Flood depth at this building — {scen_pretty}")
+                    st.subheader(f"Flood depth at this building - {scen_pretty}")
                     st.caption(
                         f"Annual-maximum stillwater **flood depth above ground** "
                         f"at this property (ground elevation: "
@@ -8914,13 +8946,13 @@ def main():
                             "to compare. "
                             "*Note:* the three return-period proxies use "
                             "P01 / P10 / P99 of the annual-maximum distribution "
-                            "as you specified — let me know if you'd prefer "
+                            "as you specified - let me know if you'd prefer "
                             "P50 / P90 / P99 (the standard engineering reading "
                             "of \"yearly / 10-year / 100-year\")."
                         )
                 
                 # ----------------------------------------------------------
-                # Retrofit "slide" cards — the numbers laid out like the
+                # Retrofit "slide" cards - the numbers laid out like the
                 # workshop action slides (elevation references + Benefit and
                 # Remaining-recovery-cost by horizon), framed so they're easy
                 # to transcribe. Cards appear only when the retrofit applies:
@@ -8957,7 +8989,7 @@ def main():
                     return float(v) if pd.notna(v) else None
 
                 def _money_c(v):
-                    return format_currency(v) if v is not None else "—"
+                    return format_currency(v) if v is not None else "-"
 
                 _cards_html = []
                 for _akey, _atitle, _show_raise in _retrofit_specs:
@@ -9017,7 +9049,7 @@ def main():
 
                 if _cards_html:
                     st.divider()
-                    st.subheader("Retrofit options — figures for the action slides")
+                    st.subheader("Retrofit options - figures for the action slides")
                     st.caption(
                         f"Computed under **{_scn_lbl_cards}** (switch SLR above). "
                         f"Benefit = avoided cumulative recovery cost vs. taking no action; remaining = the cost "
@@ -9062,7 +9094,7 @@ def main():
                             y=list(df_s['CumEAD_P95']) + list(df_s['CumEAD_P05'])[::-1],
                             fill='toself', fillcolor=style['fill_color'],
                             line=dict(color='rgba(255,255,255,0)'),
-                            name=f"{style['label']} — 90% CI",
+                            name=f"{style['label']} - 90% CI",
                             hoverinfo='skip', showlegend=True))
                         # Central P50 line
                         fig_building.add_trace(go.Scatter(
@@ -9079,7 +9111,7 @@ def main():
                     
                     fig_building.update_layout(
                         title=dict(
-                            text=f"Cumulative Damage Trajectory — Building #{selected_id}",
+                            text=f"Cumulative Damage Trajectory - Building #{selected_id}",
                             x=0.02, xanchor='left', font=dict(size=16)),
                         xaxis_title="Year",
                         yaxis_title="Cumulative Damage",
@@ -9118,11 +9150,11 @@ def main():
                     
                     def _fmt_range(lo, hi):
                         if pd.isna(lo) or pd.isna(hi):
-                            return "—"
+                            return "-"
                         return f"{format_currency(lo)} – {format_currency(hi)}"
                     
                     def _fmt_val(v):
-                        return "—" if pd.isna(v) else format_currency(v)
+                        return "-" if pd.isna(v) else format_currency(v)
                     
                     cmp_rows = []
                     for yr in sorted(pivot_p50.index):
@@ -9139,18 +9171,18 @@ def main():
                             delta, pct = float('nan'), float('nan')
                         cmp_rows.append({
                             'Year': int(yr),
-                            'Median SLR — P50': _fmt_val(med),
-                            'Median SLR — 90% CI': _fmt_range(med_lo, med_hi),
-                            'High-End SLR — P50': _fmt_val(high),
-                            'High-End SLR — 90% CI': _fmt_range(high_lo, high_hi),
+                            'Median SLR - P50': _fmt_val(med),
+                            'Median SLR - 90% CI': _fmt_range(med_lo, med_hi),
+                            'High-End SLR - P50': _fmt_val(high),
+                            'High-End SLR - 90% CI': _fmt_range(high_lo, high_hi),
                             'High-End vs Median (Δ)': _fmt_val(delta),
-                            'Increase (%)': f"{pct:.1f}%" if pd.notna(pct) else "—",
+                            'Increase (%)': f"{pct:.1f}%" if pd.notna(pct) else "-",
                         })
                     
                     st.markdown("**Side-by-side comparison across planning horizons**")
                     st.dataframe(pd.DataFrame(cmp_rows), use_container_width=True, hide_index=True)
                 
-                st.subheader(f"Adaptation Strategy Comparison — Both SLR Scenarios ({target_year})")
+                st.subheader(f"Adaptation Strategy Comparison - Both SLR Scenarios ({target_year})")
                 st.caption(
                     "How each adaptation strategy performs under both sea-level rise scenarios at the selected planning horizon. "
                     "Box edges show the 25th and 75th percentiles, the white center line is the median (P50), "
@@ -9175,7 +9207,7 @@ def main():
                     }
                     # For RES2 (manufactured housing) and RES4 (small mixed-use /
                     # temporary lodging) buildings, basement wet-floodproofing
-                    # and 1st-floor wet-floodproofing aren't viable retrofits —
+                    # and 1st-floor wet-floodproofing aren't viable retrofits -
                     # these structures typically have no basement and no
                     # conditioned 1st-floor envelope to dry out. Restrict the
                     # benefit chart (and the strategy axis below) to the
@@ -9198,7 +9230,7 @@ def main():
                     bd_actions_present = [a for a in bd_action_order
                                           if a in df_building_year['Action'].unique()]
                     
-                    # Pivots over (Action, SLR) — values are this building's P05/P50/P95
+                    # Pivots over (Action, SLR) - values are this building's P05/P50/P95
                     bd_piv = df_building_year.pivot_table(
                         index='Action', columns='SLR',
                         values=['CumEAD_P05', 'CumEAD_P50', 'CumEAD_P95'],
@@ -9255,7 +9287,7 @@ def main():
                             raw_ben75 = b75 - s75
                             # Clamp the lower whisker, Q1, Q3, and upper
                             # whisker so the box and whisker geometry is
-                            # monotone — even if rank-correlation between
+                            # monotone - even if rank-correlation between
                             # baseline and strategy realizations briefly
                             # inverts, the plotted geometry stays sensible.
                             vals = sorted([raw_ben05, raw_ben25, raw_ben50,
@@ -9286,10 +9318,10 @@ def main():
                             group_labels=[bd_action_labels[a] for a in bd_actions_for_chart],
                             scenario_data=bd_scenario_data,
                             panel_title=(
-                                f"Benefit (avoided damage) by Strategy and SLR Scenario — "
+                                f"Benefit (avoided damage) by Strategy and SLR Scenario - "
                                 f"Building #{selected_id}, Year {target_year}"
                             ),
-                            y_label="Benefit — avoided cumulative damage vs No Mitigation",
+                            y_label="Benefit - avoided cumulative damage vs No Mitigation",
                             height=500,
                         )
                         
@@ -9298,20 +9330,20 @@ def main():
                             "Each box shows the distribution of this building's **avoided damage** "
                             "(No-Mitigation damage minus the strategy's remaining damage) at the same "
                             "percentile rank, under the selected target year and for both SLR scenarios. "
-                            "The white center line is the median benefit (matches the *Benefit — Median* "
+                            "The white center line is the median benefit (matches the *Benefit - Median* "
                             "column below); the whiskers reach to the 5th and 95th percentile benefits "
-                            "(matching the *Benefit — 5th pctile* and *Benefit — 95th pctile* columns). "
+                            "(matching the *Benefit - 5th pctile* and *Benefit - 95th pctile* columns). "
                             "No Mitigation is omitted because it has no self-benefit."
                         )
                     
                     # ============================================================
-                    # Strategy performance tables — Damage, Benefit, Remaining damage
+                    # Strategy performance tables - Damage, Benefit, Remaining damage
                     # Separate Median / Min / Max columns (not single "range" cells)
                     # ============================================================
                     def _fmt_v(v):
-                        return "—" if pd.isna(v) else format_currency(v)
+                        return "-" if pd.isna(v) else format_currency(v)
                     def _fmt_pct(v):
-                        return "—" if pd.isna(v) else f"{v:.1f}%"
+                        return "-" if pd.isna(v) else f"{v:.1f}%"
                     
                     # Clamp (min, median, max) so the median is always bracketed by
                     # the printed min and max. Under perfect positive rank-correlation
@@ -9332,7 +9364,7 @@ def main():
                     }.get(scenario, scenario)
                     
                     def _build_strategy_rows_for_slr(year, slr_key):
-                        """Per-strategy rows for a given (year, SLR) — split columns.
+                        """Per-strategy rows for a given (year, SLR) - split columns.
                         Returns list[dict] with Remaining damage (Med/Min/Max),
                         Benefit (Med/Min/Max), and Reduction %."""
                         df_y = df_building[df_building['TargetYear'] == year].copy()
@@ -9384,18 +9416,20 @@ def main():
                             
                             rows.append({
                                 'Strategy':                             bd_action_labels[action],
-                                'Remaining damage — 5th pctile':        _fmt_v(dmg_lo),
-                                'Remaining damage — Median':            _fmt_v(dmg_med),
-                                'Remaining damage — 95th pctile':       _fmt_v(dmg_hi),
-                                'Benefit — 5th pctile':                 _fmt_v(ben_lo) if action != 'No mitigation' else "—",
-                                'Benefit — Median':                     _fmt_v(ben_med) if action != 'No mitigation' else "—",
-                                'Benefit — 95th pctile':                _fmt_v(ben_hi) if action != 'No mitigation' else "—",
-                                'Reduction (median)':                   _fmt_pct(red_pct) if action != 'No mitigation' else "—",
+                                'Cost estimate':                        (ADAPTATION_COST_ESTIMATES.get(action, "-")
+                                                                         if action != 'No mitigation' else "-"),
+                                'Remaining damage - 5th pctile':        _fmt_v(dmg_lo),
+                                'Remaining damage - Median':            _fmt_v(dmg_med),
+                                'Remaining damage - 95th pctile':       _fmt_v(dmg_hi),
+                                'Benefit - 5th pctile':                 _fmt_v(ben_lo) if action != 'No mitigation' else "-",
+                                'Benefit - Median':                     _fmt_v(ben_med) if action != 'No mitigation' else "-",
+                                'Benefit - 95th pctile':                _fmt_v(ben_hi) if action != 'No mitigation' else "-",
+                                'Reduction (median)':                   _fmt_pct(red_pct) if action != 'No mitigation' else "-",
                             })
                         return rows
                     
                     # ---- Selected-year tables, one per SLR scenario ----
-                    st.markdown(f"**Strategy performance — Year {target_year}**")
+                    st.markdown(f"**Strategy performance - Year {target_year}**")
                     for slr_key, slr_label in [
                         ('50th-percentile', 'Median SLR (P50)'),
                         ('90th-percentile', 'High-End SLR (P90)'),
@@ -9414,7 +9448,9 @@ def main():
                         "to No Mitigation under the same SLR scenario, shown the same way. "
                         "**Reduction (median)** is the percent drop in median damage relative to "
                         "No Mitigation. The printed 5th and 95th percentiles are clamped so the "
-                        "median always falls between them."
+                        "median always falls between them. **Cost estimate** is a rough per-measure "
+                        "installed-cost range and does not vary by year or SLR scenario. "
+                        + ADAPTATION_COST_SOURCE
                     )
                     if is_above_dfe:
                         st.info(
@@ -9434,7 +9470,7 @@ def main():
                         st.markdown(
                             "**Strategy performance across all planning horizons**  \n"
                             f"<span style='color:#64748b;font-size:0.9rem;'>"
-                            f"Building #{selected_id} — {scenario_label} "
+                            f"Building #{selected_id} - {scenario_label} "
                             "(change the SLR Scenario above to see the other)</span>",
                             unsafe_allow_html=True,
                         )
@@ -9453,13 +9489,9 @@ def main():
                             st.caption(
                                 "Same building, same metrics as above, broken out by planning horizon "
                                 f"under the **{scenario_label}** scenario. Use this to compare how a "
-                                "given strategy performs in 2040 vs 2055 vs 2060 vs 2100 — and how its benefit "
+                                "given strategy performs in 2040 vs 2055 vs 2060 vs 2100 - and how its benefit "
                                 "and remaining damage evolve as sea level rises."
                             )
-
-                st.divider()
-                st.markdown("##### 📈 Fragility curves for this building")
-                render_fragility_curves(building_row=building_info, ctx="frag_res")
         else:
             st.warning("No per-building data available for this location.")
     
@@ -9468,11 +9500,11 @@ def main():
     # ========================================================================
     if active == V_OVERVIEW:
         st.divider()
-        st.subheader("📈 Trends — scenario comparison across horizons")
+        st.subheader("📈 Trends - scenario comparison across horizons")
         st.markdown('<p class="tab-description">Compare cumulative damage projections between Median (50th-percentile) and High-End (90th-percentile) sea level rise scenarios across all time horizons.</p>', unsafe_allow_html=True)
         
         if df_agg is not None:
-            st.subheader(f"📈 Scenario Comparison — {location_name} ({occupancy_label})")
+            st.subheader(f"📈 Scenario Comparison - {location_name} ({occupancy_label})")
             
             col1, col2 = st.columns(2)
             
@@ -9499,7 +9531,7 @@ def main():
             if not df_comparison.empty:
                 fig_comp = px.line(df_comparison, x='TargetYear', y='Total_CumEAD_P50', color='Label',
                     markers=True, color_discrete_map={'Median SLR': '#3b82f6', 'High-End SLR': '#ef4444'},
-                    title=f"No Mitigation Damage: Median vs High-End SLR Scenarios — {occupancy_label}")
+                    title=f"No Mitigation Damage: Median vs High-End SLR Scenarios - {occupancy_label}")
                 _c_max = df_comparison['Total_CumEAD_P50'].max()
                 c_ticks, c_labels = smart_money_ticks(_c_max, target_n=6)
                 fig_comp.update_layout(height=450, yaxis_title="Cumulative Damage", xaxis_title="Year")
@@ -9522,12 +9554,12 @@ def main():
                 st.plotly_chart(fig_comp, use_container_width=True)
 
             # ================================================================
-            # Per-SLR-scenario trajectories — all mitigation actions together
+            # Per-SLR-scenario trajectories - all mitigation actions together
             # Separate plot per SLR scenario so each strategy's trend over time
             # can be compared directly to the No-Mitigation baseline.
             # ================================================================
             st.divider()
-            st.subheader("📉 Mitigation Strategies Over Time — by SLR Scenario")
+            st.subheader("📉 Mitigation Strategies Over Time - by SLR Scenario")
             st.caption(
                 "Cumulative community damage trajectory for every adaptation strategy "
                 "(including No Mitigation), plotted separately for each sea-level rise "
@@ -9546,7 +9578,7 @@ def main():
             }
             # Fixed per-action colors so the two SLR panels look consistent
             trend_action_colors = {
-                'No mitigation':   '#ef4444',   # red — baseline
+                'No mitigation':   '#ef4444',   # red - baseline
                 'Raise Utilities': '#0ea5e9',   # sky blue
                 'WFP B':           '#6366f1',   # indigo
                 'WFP 1st':         '#8b5cf6',   # violet
@@ -9593,7 +9625,7 @@ def main():
                     ))
 
                 fig_trend.update_layout(
-                    title=dict(text=f"{slr_label} — {occupancy_label}",
+                    title=dict(text=f"{slr_label} - {occupancy_label}",
                                x=0.02, xanchor='left', font=dict(size=14)),
                     height=450,
                     hovermode='x unified',
@@ -9647,7 +9679,7 @@ def main():
             st.warning("No data available for this location.")
 
     # ========================================================================
-    # NSI DATASET VIEW  (embedded field-survey tool — app2)
+    # NSI DATASET VIEW  (embedded field-survey tool - app2)
     # ------------------------------------------------------------------------
     # Self-contained React/Leaflet survey app, embedded via components.html.
     # It is fully isolated from the rest of ADAPT: it does not read or write
@@ -9658,28 +9690,24 @@ def main():
     # for this tab (V_NSI is intentionally absent from _PAGE_SETTINGS).
     # ========================================================================
     if active == V_NSI:
-        st.markdown(
-            '<p class="tab-description">National Structure Inventory (NSI) field-survey '
-            'tool — walk the map to add, verify, move, or flag buildings and record their '
-            'structural attributes. Edits sync to the shared Google Sheet backend.</p>',
-            unsafe_allow_html=True,
-        )
         # The NSI tool is a self-contained React/Leaflet browser app, so it
         # must live in a component iframe (that is what every Streamlit
         # component is). To make it read as a NATIVE full-page view rather
-        # than a small fixed "box", we force its iframe to fill the viewport,
+        # than a small fixed "box", we force ITS iframe to fill the viewport,
         # strip the frame border, and trim the surrounding block padding.
-        # Selectors cover several Streamlit versions; whichever matches wins.
+        # The height rule is scoped to the NSI component's own keyed container
+        # (`.st-key-nsi_embed`) so it does NOT catch the tiny invisible
+        # copy-fix helper component near the top of the page - an earlier,
+        # unscoped rule inflated that height:0 iframe to 560px, which is what
+        # produced the big empty band above the title on this tab.
         # Tune the "205px" offset if you want more/less breathing room above.
         st.markdown(
             "<style>"
             "section[data-testid='stMain'] .block-container,"
             "[data-testid='stMainBlockContainer']{padding-top:1.1rem;padding-bottom:0;}"
-            "[data-testid='stCustomComponentV1'],"
-            "[data-testid='stIFrame'],"
-            "[data-testid='stMainBlockContainer'] iframe,"
-            "section[data-testid='stMain'] iframe,"
-            ".main .block-container iframe{"
+            ".st-key-nsi_embed [data-testid='stCustomComponentV1'],"
+            ".st-key-nsi_embed [data-testid='stIFrame'],"
+            ".st-key-nsi_embed iframe{"
             "height:calc(100vh - 205px)!important;min-height:560px!important;"
             "width:100%!important;border:none!important;display:block;"
             "}"
@@ -9709,23 +9737,17 @@ def main():
             # window.__ADAPT_LOCATION is set in time for the tool to read it.
             _anchor = '<script type="text/babel"'
             nsi_html_loc = nsi_html.replace(_anchor, _inject + _anchor, 1)
-            # The height arg is a fallback/min; the CSS above stretches the
-            # iframe to fill the viewport. The app's flex column splits that
-            # height into the top toolbar + the map/right-panel row.
-            _components.html(nsi_html_loc, height=900, scrolling=False)
+            # The height arg is a fallback/min; the scoped CSS above stretches
+            # this component's iframe to fill the viewport. The keyed container
+            # gives it the `.st-key-nsi_embed` hook the CSS targets, so only
+            # this iframe is resized (not the page's other components).
+            with _keyed_container("nsi_embed"):
+                _components.html(nsi_html_loc, height=900, scrolling=False)
 
     # ========================================================================
     # FRAGILITY CURVES VIEW
     # ========================================================================
     if active == V_FRAG:
-        st.markdown(
-            '<p class="tab-description">Explore the FEMA/Hazus depth-damage (fragility) curves '
-            'behind the damage model. Pick an occupancy, flood zone, and basement condition, and '
-            'the tool overlays the structure- and content-damage curves for each number of stories '
-            'on one plot. The curves are read directly from the FAST tables shipped with the app. '
-            'In the example-building tabs, the building&#39;s own curve is highlighted.</p>',
-            unsafe_allow_html=True,
-        )
         render_fragility_curves(building_row=None, ctx="frag_main")
 
     # ========================================================================
