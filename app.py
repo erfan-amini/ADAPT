@@ -7618,42 +7618,13 @@ def main():
                                 "black ring. Uncheck the sidebar option to compare all retrofits."
                             )
                         else:
-                            # Caption mirrors the classifier: Raise Utilities and
-                            # WFP Basement are separate groups; whichever cheap
-                            # column is absent for this inventory is simply omitted.
-                            _grp_bits = []
-                            if _has_raiseu:
-                                _grp_bits.append(
-                                    "**Raise Utilities** (raising at-risk utilities brings P90 \u2264 $1k)"
-                                )
-                            if _has_wfpb:
-                                _grp_bits.append(
-                                    "**WFP Basement** (basement floodproofing brings P90 \u2264 $1k)"
-                                )
-                            _cheap_chain = (" \u2192 " + " \u2192 ".join(_grp_bits)) if _grp_bits else ""
                             st.caption(
-                                "Each building is colored by the **cheapest adaptation that "
-                                "eliminates** its upper-tail (P90) cumulative damage under "
-                                "the selected year and SLR scenario. Groups are checked in "
-                                "priority order: "
-                                "**No Damage** (baseline P90 \u2264 $1k - no intervention needed)"
-                                f"{_cheap_chain} \u2192 "
-                                "**Elevation** (the cheaper retrofits don't reach the threshold "
-                                "but elevation does) \u2192 "
-                                "**Residual Damage** (Under-DFE homes **below BFE** where even "
-                                "**elevation** cannot bring P90 \u2264 $1k, i.e. raising the home still "
-                                "can't bring the upper-tail damage to zero - the conversation has to "
-                                "move beyond retrofits, to buyout, relocation, or larger community-scale "
-                                "interventions). Homes at or above BFE are never colored Residual, even "
-                                "inside the BFE-to-DFE freeboard band. "
-                                "Above-DFE buildings whose damage isn't eliminated by the "
-                                "retrofits shown are not "
-                                "plotted on this view - their relevant adaptation options "
-                                "(wet floodproofing the first floor, content-only measures, "
-                                "etc.) aren't represented in the pyramid above. "
-                                "Each building appears in exactly one color, and the legend "
-                                "counts partition the buildings shown. Non-residential "
-                                "buildings are marked with a black ring."
+                                "Each building is colored by the **cheapest measure that eliminates** "
+                                "its P90 damage, in priority order: **No Damage** \u2192 **Raise Utilities** "
+                                "\u2192 **WFP Basement** \u2192 **Elevation** \u2192 **Residual Damage** "
+                                "(Under-DFE, below BFE, and even elevation can't reach $0). Homes at or "
+                                "above BFE, and Above-DFE homes, are never colored Residual. "
+                                "Non-residential buildings have a black ring."
                             )
                     elif map_view == "Damage Bins":
                         st.caption(
