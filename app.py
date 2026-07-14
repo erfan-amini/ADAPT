@@ -4040,9 +4040,11 @@ def build_box_whisker_panel(group_labels, scenario_data, panel_title="",
     y_head = y_max_whisker * 1.22 if y_max_whisker > 0 else y_span * 0.2
     y_floor = y_min * 1.15 if y_min < 0 else 0
     label_gap = y_span * 0.025       # small vertical gap above each line/whisker
+    med_label_gap = label_gap * 0.35 # median label sits a touch closer to its line
 
     # Annotations: every label sits directly above its reference line -
-    #   * Median label sits just above the median line (yanchor='bottom')
+    #   * Median label sits just above the median line (yanchor='bottom'),
+    #     nudged down close to the line via the smaller med_label_gap.
     #   * P95 label sits just above the upper whisker
     # The lower whisker (P05) is intentionally NOT labeled.
     # X position is the exact numeric center of each box, so labels never
@@ -4052,7 +4054,7 @@ def build_box_whisker_panel(group_labels, scenario_data, panel_title="",
         # Median - bold colored text on a semi-transparent white pill,
         # placed just above the median line so it doesn't overlap it.
         fig.add_annotation(
-            x=x_center, y=p50_v + label_gap,
+            x=x_center, y=p50_v + med_label_gap,
             text=f"<b>{med_text}</b>",
             showarrow=False,
             xanchor='center', yanchor='bottom',
