@@ -6271,7 +6271,7 @@ def main():
                             "provides meaningful additional protection beyond what basement "
                             "floodproofing achieves. This dominance rule matches the Map tab's "
                             "Adaptation Effectiveness classifier "
-                            "(No Damage → WFP Basement → Elevation → Residual)."
+                            "(No Damage \u2192 Raise Utilities \u2192 Elevation \u2192 Residual)."
                         )
                     else:
                         st.caption(
@@ -6287,7 +6287,7 @@ def main():
                             "provides meaningful additional protection beyond what basement "
                             "floodproofing achieves. This dominance rule matches the Map tab's "
                             "Adaptation Effectiveness classifier "
-                            "(No Damage → WFP Basement → Elevation → Residual)."
+                            "(No Damage \u2192 Raise Utilities \u2192 WFP Basement \u2192 Elevation \u2192 Residual)."
                         )
                 
     
@@ -6910,19 +6910,21 @@ def main():
                         # Raise Utilities contributes there - behaviour unchanged.
                         col_nomit = 'No mitigation_P90'
                         col_elev  = 'Elevate_P90'
-                        _cheap_specs = [
-                            ('WFP B_P90',           'WFP Basement'),
-                            ('Raise Utilities_P90', 'Raise Utilities'),
-                        ]
-                        _cheap_present = [(c, lbl) for c, lbl in _cheap_specs
-                                          if c in df_map.columns]
-                        _cheap_available = len(_cheap_present) > 0
-                        if len(_cheap_present) == 2:
-                            cheap_retrofit_label = 'WFP Basement / Raise Utilities'
-                        elif _cheap_present:
-                            cheap_retrofit_label = _cheap_present[0][1]
-                        else:
-                            cheap_retrofit_label = 'Cheap retrofit'
+                        # Raise Utilities and WFP Basement are now SEPARATE
+                        # groups on this map (previously merged into one yellow
+                        # "cheap retrofit" bucket). Either column may be absent
+                        # for a given inventory (e.g. WFP Basement is dropped
+                        # upstream at Pamunkey's RES2/pier inventory), in which
+                        # case that group is simply empty and omitted.
+                        col_raiseu = 'Raise Utilities_P90'
+                        col_wfpb   = 'WFP B_P90'
+                        _has_raiseu = col_raiseu in df_map.columns
+                        _has_wfpb   = col_wfpb   in df_map.columns
+                        _cheap_present = [(c, lbl) for c, lbl in (
+                            (col_raiseu, 'Raise Utilities'),
+                            (col_wfpb,   'WFP Basement'),
+                        ) if c in df_map.columns]
+                        _cheap_available = bool(_cheap_present)
 
                         # No mitigation + Elevate are hard-required; the cheap
                         # retrofit (yellow bucket) is optional. When neither cheap
@@ -6946,17 +6948,22 @@ def main():
                             elev_raw   = df_map[col_elev].values.astype(float)
 
                             no_mit = np.where(np.isnan(no_mit_raw), 0.0, no_mit_raw)
-                            # A building is in the yellow bucket if ANY available
-                            # cheap retrofit brings its P90 to <= thr. NaN in a
-                            # retrofit column ==> "retrofit not applied" ==>
-                            # baseline (so a missing value can't push a building
-                            # into yellow).
-                            cheap_to_thr = np.zeros(len(df_map), dtype=bool)
-                            for _cc, _clbl in _cheap_present:
-                                _cheap_raw = df_map[_cc].values.astype(float)
-                                _cheap_val = np.where(np.isnan(_cheap_raw), no_mit, _cheap_raw)
-                                cheap_to_thr |= (_cheap_val <= thr)
                             elev   = np.where(np.isnan(elev_raw), no_mit, elev_raw)
+
+                            # Per-retrofit "brings P90 to <= thr" masks, computed
+                            # SEPARATELY for Raise Utilities and WFP Basement so
+                            # each gets its own group. NaN in a retrofit column
+                            # ==> "retrofit not applied" ==> baseline (so a
+                            # missing value can't push a building into a group).
+                            # An absent column ==> an all-False mask.
+                            def _brings_to_thr(colname, present):
+                                if not present:
+                                    return np.zeros(len(df_map), dtype=bool)
+                                _raw = df_map[colname].values.astype(float)
+                                _val = np.where(np.isnan(_raw), no_mit, _raw)
+                                return _val <= thr
+                            raiseu_to_thr = _brings_to_thr(col_raiseu, _has_raiseu)
+                            wfpb_to_thr   = _brings_to_thr(col_wfpb,   _has_wfpb)
                             
                             # --- MAP classifier (threshold rule) ---
                             # Five buckets ordered by the cheapest adaptation
@@ -6966,23 +6973,29 @@ def main():
                             # cheap retrofit → expensive retrofit (elevation) →
                             # nothing works.
                             #
-                            #   1 = No Damage     baseline P90 ≤ thr
-                            #   2 = Cheap fix     baseline > thr AND at least one
-                            #                     cheap retrofit (WFP Basement
-                            #                     and/or Raise Utilities, whichever
-                            #                     are present) brings P90 ≤ thr
-                            #   3 = Elevation     baseline > thr, cheap retrofit
-                            #                     doesn't reach thr, but elevation
-                            #                     DOES bring P90 ≤ thr
-                            #   4 = Residual      Under-DFE, damaged, neither
-                            #                     retrofit (cheap nor elevation)
-                            #                     brings P90 ≤ thr - even the
-                            #                     strongest adaptation in scope
-                            #                     leaves residual damage, so the
-                            #                     conversation has to move to
-                            #                     buyout / relocation / managed
-                            #                     retreat. Drawn in red.
-                            #   5 = Out of scope  Above-DFE buildings that fall
+                            #   1 = No Damage        baseline P90 <= thr
+                            #   2 = Raise Utilities   baseline > thr AND Raise
+                            #                         Utilities brings P90 <= thr
+                            #   3 = WFP Basement      baseline > thr, Raise Utilities
+                            #                         doesn't reach thr, but WFP
+                            #                         Basement brings P90 <= thr
+                            #   4 = Elevation         baseline > thr, neither cheap
+                            #                         retrofit reaches thr, but
+                            #                         elevation brings P90 <= thr
+                            #   5 = Residual          Under-DFE, damaged, and even
+                            #                         ELEVATION cannot bring P90 to
+                            #                         zero (<= thr). This is defined
+                            #                         purely on elevation: the
+                            #                         damaged Under-DFE buildings
+                            #                         that raising the home still
+                            #                         cannot bring to zero at the
+                            #                         P90 upper-tail level. The
+                            #                         strongest adaptation in scope
+                            #                         leaves residual damage, so the
+                            #                         conversation has to move to
+                            #                         buyout / relocation / managed
+                            #                         retreat. Drawn in red.
+                            #   6 = Out of scope  Above-DFE buildings that fall
                             #                     through (their retrofit options
                             #                     are different from those in the
                             #                     three-bucket pyramid above -
@@ -7019,43 +7032,48 @@ def main():
                             else:
                                 is_under_dfe = np.zeros(len(df_map), dtype=bool)
 
-                            # Priority classification. Default = 5 (out of
+                            # Priority classification. Default = 6 (out of
                             # scope / omitted) so any building not affirmatively
-                            # placed in 1–4 drops off the map quietly.
-                            cat = np.full(len(df_map), 5, dtype=int)
+                            # placed in 1-5 drops off the map quietly. Cheapest
+                            # working measure first (Raise Utilities before WFP
+                            # Basement, per the workshop cost ordering).
+                            cat = np.full(len(df_map), 6, dtype=int)
                             cat[no_mit <= thr] = 1
-                            cat[(no_mit > thr) & cheap_to_thr] = 2
-                            cat[(no_mit > thr) & ~cheap_to_thr & elev_to_thr] = 3
-                            cat[(no_mit > thr) & ~cheap_to_thr & ~elev_to_thr & is_under_dfe] = 4
+                            cat[(no_mit > thr) & raiseu_to_thr] = 2
+                            cat[(no_mit > thr) & ~raiseu_to_thr & wfpb_to_thr] = 3
+                            cat[(no_mit > thr) & ~raiseu_to_thr & ~wfpb_to_thr & elev_to_thr] = 4
+                            cat[(no_mit > thr) & ~raiseu_to_thr & ~wfpb_to_thr & ~elev_to_thr & is_under_dfe] = 5
 
                             df_map['_cat_action'] = cat
 
                             # Legend counts - each building appears in exactly
                             # one bucket, so these add up to (buildings shown).
-                            n_no_damage  = int((cat == 1).sum())
-                            n_wfpb_works = int((cat == 2).sum())
-                            n_elev_works = int((cat == 3).sum())
-                            n_residual   = int((cat == 4).sum())
                             cat_legend_counts = {
-                                1: n_no_damage,
-                                2: n_wfpb_works,
-                                3: n_elev_works,
-                                4: n_residual,
+                                1: int((cat == 1).sum()),
+                                2: int((cat == 2).sum()),
+                                3: int((cat == 3).sum()),
+                                4: int((cat == 4).sum()),
+                                5: int((cat == 5).sum()),
                             }
 
-                            # Workshop palette + red residual.
-                            # cat=5 (Above-DFE fall-through) is intentionally
-                            # absent from cat_specs and therefore not plotted.
+                            # Palette walks the decision pyramid green -> lime ->
+                            # yellow -> orange -> red. cat=6 (Above-DFE
+                            # fall-through) is intentionally absent from cat_specs
+                            # and therefore not plotted.
                             cat_specs = [
-                                (1, 'No Damage',            '#22c55e'),  # green
-                                (2, cheap_retrofit_label,   '#facc15'),  # yellow
-                                (3, 'Elevation',            '#f97316'),  # orange
-                                (4, 'Residual Damage',      '#dc2626'),  # red
+                                (1, 'No Damage',        '#22c55e'),  # green
+                                (2, 'Raise Utilities',  '#a3e635'),  # lime
+                                (3, 'WFP Basement',     '#facc15'),  # yellow
+                                (4, 'Elevation',        '#f97316'),  # orange
+                                (5, 'Residual Damage',  '#dc2626'),  # red
                             ]
-                            # Cheap retrofit unavailable for this inventory (e.g.
-                            # all-RES2): drop its necessarily-empty yellow bucket.
-                            if not _cheap_available:
+                            # Drop a cheap-retrofit group entirely when its column
+                            # isn't present for this inventory (its bucket is
+                            # necessarily empty).
+                            if not _has_raiseu:
                                 cat_specs = [cs for cs in cat_specs if cs[0] != 2]
+                            if not _has_wfpb:
+                                cat_specs = [cs for cs in cat_specs if cs[0] != 3]
                             
                             for ci, label, color in cat_specs:
                                 df_c = df_map[df_map['_cat_action'] == ci]
@@ -7579,35 +7597,38 @@ def main():
                                 "black ring. Uncheck the sidebar option to compare all retrofits."
                             )
                         else:
-                            # Caption mirrors the classifier: the yellow bucket is
-                            # whichever cheap retrofit(s) are present in the data -
-                            # WFP Basement and/or Raise Utilities.
-                            _cheap_lbl = cheap_retrofit_label
-                            _desc_map = {
-                                'WFP Basement':    'basement floodproofing',
-                                'Raise Utilities': 'raising at-risk utilities',
-                            }
-                            _descs = [_desc_map.get(lbl, lbl.lower())
-                                      for _c, lbl in _cheap_present]
-                            _cheap_desc = ' or '.join(_descs) if _descs else 'a cheap retrofit'
+                            # Caption mirrors the classifier: Raise Utilities and
+                            # WFP Basement are separate groups; whichever cheap
+                            # column is absent for this inventory is simply omitted.
+                            _grp_bits = []
+                            if _has_raiseu:
+                                _grp_bits.append(
+                                    "**Raise Utilities** (raising at-risk utilities brings P90 \u2264 $1k)"
+                                )
+                            if _has_wfpb:
+                                _grp_bits.append(
+                                    "**WFP Basement** (basement floodproofing brings P90 \u2264 $1k)"
+                                )
+                            _cheap_chain = (" \u2192 " + " \u2192 ".join(_grp_bits)) if _grp_bits else ""
                             st.caption(
                                 "Each building is colored by the **cheapest adaptation that "
                                 "eliminates** its upper-tail (P90) cumulative damage under "
-                                "the selected year and SLR scenario. Buckets are checked in "
+                                "the selected year and SLR scenario. Groups are checked in "
                                 "priority order: "
-                                "**No Damage** (baseline P90 ≤ $1k - no intervention needed) → "
-                                f"**{_cheap_lbl}** ({_cheap_desc} brings P90 ≤ $1k) → "
-                                "**Elevation** (the cheap retrofit doesn't reach the threshold "
-                                "but elevation does) → "
-                                "**Residual Damage** (Under-DFE buildings where neither the "
-                                "cheap retrofit nor elevation can bring P90 ≤ $1k - "
-                                "the conversation has to move beyond retrofits, to buyout, "
-                                "relocation, or larger community-scale interventions). "
+                                "**No Damage** (baseline P90 \u2264 $1k - no intervention needed)"
+                                f"{_cheap_chain} \u2192 "
+                                "**Elevation** (the cheaper retrofits don't reach the threshold "
+                                "but elevation does) \u2192 "
+                                "**Residual Damage** (Under-DFE buildings where even **elevation** "
+                                "cannot bring P90 \u2264 $1k, i.e. raising the home still can't bring "
+                                "the upper-tail damage to zero - the conversation has to move beyond "
+                                "retrofits, to buyout, relocation, or larger community-scale "
+                                "interventions). "
                                 "Above-DFE buildings whose damage isn't eliminated by the "
                                 "retrofits shown are not "
                                 "plotted on this view - their relevant adaptation options "
                                 "(wet floodproofing the first floor, content-only measures, "
-                                "etc.) aren't represented in the three-bucket pyramid above. "
+                                "etc.) aren't represented in the pyramid above. "
                                 "Each building appears in exactly one color, and the legend "
                                 "counts partition the buildings shown. Non-residential "
                                 "buildings are marked with a black ring."
@@ -8661,6 +8682,8 @@ def main():
                     default_idx = sorted_ids.index(int(stored_id))
                 elif selected_location == "Pamunkey" and 579536184 in building_ids:
                     default_idx = sorted_ids.index(579536184)
+                elif selected_location == "Mastic Beach" and 8386312 in building_ids:
+                    default_idx = sorted_ids.index(8386312)
                 else:
                     default_idx = 0
             except (ValueError, TypeError):
@@ -9025,8 +9048,12 @@ def main():
                     if df_building[(df_building['Action'] == _akey)
                                    & (df_building['SLR'] == _scn_for_cards)].empty:
                         continue
-                    if _akey == 'WFP 1st' and (pd.isna(_nstory) or float(_nstory) <= 1):
-                        continue
+                    # WFP 1st Floor is shown whenever the model has data for it
+                    # (it is dropped upstream for RES2 / manufactured homes, so
+                    # the emptiness check above already hides it there). It is
+                    # no longer gated on story count, so the residential example
+                    # always shows a "wet floodproof the first floor" box when
+                    # the building has WFP 1st data.
 
                     _elev_bits = []
                     if pd.notna(_gnd):
